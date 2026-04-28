@@ -112,7 +112,10 @@ def get_points(user_id: int) -> int:
 #   "label": "🎁 ...",
 #   "kind": "regular" | "daily_gift" | "referral" | "service_item" | "account" | "stats",
 #   "text": "...",          (للأنواع regular/recharge etc.)
-#   "price": 100,           (لـ service_item فقط)
+#   "price": 100,           (لـ service_item فقط — السعر لكل وحدة)
+#   "description": "...",   (لـ service_item فقط — وصف الخدمة)
+#   "min_qty": 100,         (لـ service_item فقط — الحد الأدنى للعدد)
+#   "max_qty": 10000,       (لـ service_item فقط — الحد الأقصى للعدد)
 #   "children": [...]
 # }
 
@@ -167,6 +170,17 @@ def _ensure_kind(items):
         if "children" not in it:
             it["children"] = []
             changed = True
+        # Backward-compat لخدمات قديمة بدون الحقول الجديدة
+        if it.get("kind") == "service_item":
+            if "description" not in it:
+                it["description"] = ""
+                changed = True
+            if "min_qty" not in it:
+                it["min_qty"] = 1
+                changed = True
+            if "max_qty" not in it:
+                it["max_qty"] = 10000
+                changed = True
         if _ensure_kind(it["children"]):
             changed = True
     return changed
@@ -268,6 +282,11 @@ KIND_LABELS = {
     "stats": "📊 الإحصائيات",
 }
 
+# حالة طلبات المستخدمين (لتسلسل: عدد → رابط)
+# user_state[user_id] = {"action": "order_qty"|"order_link", "service_id": str,
+#                        "qty": int, "total": int}
+user_state = {}
+
 
 async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
     """يعالج الأنواع الخاصة. ترجع True إذا تم التعامل."""
@@ -311,37 +330,25 @@ async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
 
     if kind == "service_item":
         price = int(item.get("price", 0))
+        desc = item.get("description", "") or ""
+        min_q = int(item.get("min_qty", 1))
+        max_q = int(item.get("max_qty", 10000))
+
+        # نبدأ تسلسل الطلب: نطلب من المستخدم العدد
+        user_state[user.id] = {"action": "order_qty", "service_id": item["id"]}
+
+        info = [f"🛒 <b>{item['label']}</b>"]
+        if desc.strip():
+            info.append(f"\n📄 <b>الوصف:</b>\n{desc}")
+        info.append(f"\n💰 السعر: <b>{price}</b> نقطة لكل وحدة")
+        info.append(f"🔢 العدد المسموح: من <b>{min_q}</b> إلى <b>{max_q}</b>")
         balance = get_points(user.id)
-        if balance < price:
-            await c.answer(f"❌ نقاطك غير كافية!\nالسعر: {price} | رصيدك: {balance}", show_alert=True)
-            return True
-        # خصم النقاط وإرسال إشعار للمالك
-        u = users[user.id]
-        u["points"] = balance - price
-        save_users()
-        await c.answer("✅ تم استلام طلبك")
-        await c.message.answer(
-            f"✅ <b>تم تنفيذ الطلب بنجاح</b>\n\n"
-            f"🛒 الخدمة: {item['label']}\n"
-            f"💰 تم خصم: <b>{price}</b> نقطة\n"
-            f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
-            f"📦 سيتم تنفيذ طلبك في أقرب وقت.",
-            parse_mode='HTML',
-        )
-        # إشعار المالك
-        try:
-            uname = f"@{user.username}" if user.username else "—"
-            await bot.send_message(
-                ADMIN_ID,
-                f"🔔 <b>طلب جديد</b>\n\n"
-                f"👤 المستخدم: <code>{user.id}</code> ({uname})\n"
-                f"🛒 الخدمة: {item['label']}\n"
-                f"💰 السعر: {price} نقطة\n"
-                f"💵 رصيد المستخدم بعد الخصم: {u['points']}",
-                parse_mode='HTML',
-            )
-        except Exception as e:
-            logging.warning(f"تعذر إرسال إشعار للمالك: {e}")
+        info.append(f"💵 رصيدك الحالي: <b>{balance}</b> نقطة")
+        info.append(f"\n📝 أرسل الآن العدد المطلوب (رقم بين {min_q} و {max_q}):")
+        info.append(f"للإلغاء أرسل /cancel")
+
+        await c.answer()
+        await c.message.answer("\n".join(info), parse_mode='HTML')
         return True
 
     if kind == "account":
@@ -393,7 +400,18 @@ def admin_edit_keyboard(item):
         kb.add(types.InlineKeyboardButton("📝 تعديل الرد (النص)", callback_data=f"a:txt:{item['id']}"))
     if item.get("kind") == "service_item":
         cur_price = item.get("price", 0)
-        kb.add(types.InlineKeyboardButton(f"💰 تعديل السعر (الآن: {cur_price})", callback_data=f"a:price:{item['id']}"))
+        cur_min = item.get("min_qty", 1)
+        cur_max = item.get("max_qty", 10000)
+        cur_desc = item.get("description", "") or ""
+        desc_state = "✓ موجود" if cur_desc.strip() else "✗ غير موجود"
+        kb.add(types.InlineKeyboardButton(
+            f"💰 السعر/وحدة (الآن: {cur_price})", callback_data=f"a:price:{item['id']}"))
+        kb.add(types.InlineKeyboardButton(
+            f"📄 وصف الخدمة ({desc_state})", callback_data=f"a:desc:{item['id']}"))
+        kb.add(types.InlineKeyboardButton(
+            f"🔻 الحد الأدنى للعدد (الآن: {cur_min})", callback_data=f"a:minq:{item['id']}"))
+        kb.add(types.InlineKeyboardButton(
+            f"🔺 الحد الأقصى للعدد (الآن: {cur_max})", callback_data=f"a:maxq:{item['id']}"))
     kb.add(types.InlineKeyboardButton("➕ إضافة زر فرعي", callback_data=f"a:addsub:{item['id']}"))
     if item.get("children"):
         for sub in item["children"]:
@@ -443,6 +461,9 @@ admin_state = {}
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(msg: types.Message):
+    # إلغاء أي طلب جارٍ للمستخدم عند البدء من جديد
+    user_state.pop(msg.from_user.id, None)
+
     args = msg.get_args() or ""
     referred_by = None
     if args.startswith("ref_"):
@@ -501,6 +522,22 @@ async def cmd_admin(msg: types.Message):
     )
 
 
+@dp.message_handler(commands=['cancel'])
+async def cmd_cancel(msg: types.Message):
+    """إلغاء أي عملية جارية (طلب مستخدم أو حالة مالك)."""
+    cancelled = False
+    if msg.from_user.id in user_state:
+        user_state.pop(msg.from_user.id, None)
+        cancelled = True
+    if msg.from_user.id == ADMIN_ID and ADMIN_ID in admin_state:
+        admin_state.pop(ADMIN_ID, None)
+        cancelled = True
+    if cancelled:
+        await msg.answer("✅ تم إلغاء العملية.", reply_markup=user_keyboard())
+    else:
+        await msg.answer("لا توجد عملية جارية.", reply_markup=user_keyboard())
+
+
 def stats_text() -> str:
     total_users = len(users)
     total_points = sum(int(u.get("points", 0)) for u in users.values())
@@ -529,6 +566,10 @@ async def cb_user(c: types.CallbackQuery):
     if not item:
         await c.answer("⚠️ هذا الزر لم يعد متوفراً.", show_alert=True)
         return
+
+    # إذا كان المستخدم في منتصف طلب خدمة وضغط زر آخر — نلغي الطلب السابق
+    if c.from_user.id in user_state and item.get("kind") != "service_item":
+        user_state.pop(c.from_user.id, None)
 
     if await handle_special_kind(c, item):
         return
@@ -691,8 +732,11 @@ async def cb_admin(c: types.CallbackQuery):
             await c.answer("⚠️ غير موجود", show_alert=True)
             return
         item["kind"] = new_kind
-        if new_kind == "service_item" and "price" not in item:
-            item["price"] = 0
+        if new_kind == "service_item":
+            item.setdefault("price", 0)
+            item.setdefault("description", "")
+            item.setdefault("min_qty", 1)
+            item.setdefault("max_qty", 10000)
         save_menu()
         await c.answer("✅ تم تغيير النوع")
         try:
@@ -727,7 +771,31 @@ async def cb_admin(c: types.CallbackQuery):
         item_id = parts[2]
         admin_state[ADMIN_ID] = {"action": "edit_price", "target_id": item_id}
         await c.answer()
-        await c.message.answer("📝 أرسل السعر الجديد بالنقاط (رقم فقط):")
+        await c.message.answer("📝 أرسل السعر الجديد بالنقاط لكل وحدة (رقم فقط):")
+        return
+
+    if action == "desc":
+        item_id = parts[2]
+        admin_state[ADMIN_ID] = {"action": "edit_desc", "target_id": item_id}
+        await c.answer()
+        await c.message.answer(
+            "📝 أرسل وصف الخدمة (سيظهر للمشترك عند اختيار الخدمة).\n"
+            "لمسح الوصف أرسل: -"
+        )
+        return
+
+    if action == "minq":
+        item_id = parts[2]
+        admin_state[ADMIN_ID] = {"action": "edit_minq", "target_id": item_id}
+        await c.answer()
+        await c.message.answer("📝 أرسل الحد الأدنى المسموح به لعدد الرشق (رقم صحيح موجب):")
+        return
+
+    if action == "maxq":
+        item_id = parts[2]
+        admin_state[ADMIN_ID] = {"action": "edit_maxq", "target_id": item_id}
+        await c.answer()
+        await c.message.answer("📝 أرسل الحد الأقصى المسموح به لعدد الرشق (رقم صحيح موجب):")
         return
 
     if action == "addsub":
@@ -760,6 +828,126 @@ async def cb_admin(c: types.CallbackQuery):
                 reply_markup=admin_main_keyboard(),
             )
         return
+
+
+# ================================================================
+#                 استقبال إدخال المستخدم أثناء الطلب
+# ================================================================
+
+async def _process_user_order(msg: types.Message) -> bool:
+    """يعالج رسالة المستخدم إذا كان في تسلسل طلب خدمة. ترجع True إذا تمت المعالجة."""
+    uid = msg.from_user.id
+    if uid not in user_state:
+        return False
+
+    state = user_state[uid]
+    text = (msg.text or "").strip()
+
+    if text in ("/cancel", "إلغاء"):
+        user_state.pop(uid, None)
+        await msg.answer("❌ تم إلغاء الطلب.", reply_markup=user_keyboard())
+        return True
+
+    item, _, _ = find_item(state.get("service_id", ""))
+    if not item or item.get("kind") != "service_item":
+        user_state.pop(uid, None)
+        await msg.answer("⚠️ الخدمة لم تعد متوفرة.", reply_markup=user_keyboard())
+        return True
+
+    if state["action"] == "order_qty":
+        try:
+            q = int(text)
+        except ValueError:
+            await msg.answer("⚠️ أرسل رقماً صحيحاً للعدد، أو /cancel للإلغاء.")
+            return True
+        min_q = int(item.get("min_qty", 1))
+        max_q = int(item.get("max_qty", 10000))
+        if q < min_q or q > max_q:
+            await msg.answer(
+                f"⚠️ يجب أن يكون العدد بين <b>{min_q}</b> و <b>{max_q}</b>.\n"
+                f"حاول مرة أخرى أو أرسل /cancel للإلغاء.",
+                parse_mode='HTML',
+            )
+            return True
+        price = int(item.get("price", 0))
+        total = price * q
+        balance = get_points(uid)
+        if balance < total:
+            user_state.pop(uid, None)
+            await msg.answer(
+                f"❌ نقاطك غير كافية!\n"
+                f"العدد المطلوب: <b>{q}</b>\n"
+                f"التكلفة الإجمالية: <b>{total}</b> نقطة\n"
+                f"رصيدك الحالي: <b>{balance}</b> نقطة",
+                parse_mode='HTML',
+                reply_markup=user_keyboard(),
+            )
+            return True
+        # نسجل العدد وننتقل لطلب الرابط
+        state["action"] = "order_link"
+        state["qty"] = q
+        state["total"] = total
+        await msg.answer(
+            f"✅ تم اختيار العدد: <b>{q}</b>\n"
+            f"💰 التكلفة الإجمالية: <b>{total}</b> نقطة\n\n"
+            f"🔗 الآن أرسل رابط الحساب أو المنشور المطلوب:\n"
+            f"للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return True
+
+    if state["action"] == "order_link":
+        link = text
+        if not link or len(link) < 4:
+            await msg.answer("⚠️ أرسل رابطاً صحيحاً، أو /cancel للإلغاء.")
+            return True
+        q = int(state.get("qty", 0))
+        total = int(state.get("total", 0))
+        balance = get_points(uid)
+        if balance < total:
+            user_state.pop(uid, None)
+            await msg.answer("❌ نقاطك لم تعد كافية لإتمام الطلب.", reply_markup=user_keyboard())
+            return True
+        # خصم النقاط وإغلاق الحالة
+        u = users[uid]
+        u["points"] = balance - total
+        save_users()
+        user_state.pop(uid, None)
+
+        await msg.answer(
+            f"✅ <b>تم استلام طلبك بنجاح</b>\n\n"
+            f"🛒 الخدمة: {item['label']}\n"
+            f"🔢 العدد: <b>{q}</b>\n"
+            f"💰 التكلفة: <b>{total}</b> نقطة\n"
+            f"🔗 الرابط: {link}\n"
+            f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
+            f"📦 سيتم تنفيذ طلبك في أقرب وقت.",
+            parse_mode='HTML',
+            reply_markup=user_keyboard(),
+            disable_web_page_preview=True,
+        )
+
+        # إشعار المالك بكامل تفاصيل الطلب
+        try:
+            uname = f"@{msg.from_user.username}" if msg.from_user.username else "—"
+            await bot.send_message(
+                ADMIN_ID,
+                f"🔔 <b>طلب جديد</b>\n\n"
+                f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+                f"🛒 الخدمة: {item['label']}\n"
+                f"🔢 العدد: <b>{q}</b>\n"
+                f"💰 السعر/وحدة: {int(item.get('price', 0))} نقطة\n"
+                f"💰 التكلفة الإجمالية: <b>{total}</b> نقطة\n"
+                f"🔗 الرابط: {link}\n"
+                f"💵 رصيد المستخدم بعد الخصم: {u['points']}",
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logging.warning(f"تعذر إرسال إشعار للمالك: {e}")
+        return True
+
+    return False
 
 
 # ================================================================
@@ -857,8 +1045,52 @@ async def admin_input(msg: types.Message):
         item["price"] = val
         save_menu()
         admin_state.pop(ADMIN_ID, None)
-        await msg.answer(f"✅ تم تحديث السعر إلى: <b>{val}</b> نقطة",
+        await msg.answer(f"✅ تم تحديث السعر إلى: <b>{val}</b> نقطة لكل وحدة",
                          parse_mode='HTML', reply_markup=admin_main_keyboard())
+        return
+
+    if state["action"] == "edit_desc":
+        item, _, _ = find_item(state["target_id"])
+        if not item:
+            await msg.answer("⚠️ العنصر لم يعد موجوداً.")
+            admin_state.pop(ADMIN_ID, None)
+            return
+        new_desc = "" if text.strip() == "-" else text
+        item["description"] = new_desc
+        save_menu()
+        admin_state.pop(ADMIN_ID, None)
+        if new_desc:
+            await msg.answer("✅ تم تحديث وصف الخدمة.", reply_markup=admin_main_keyboard())
+        else:
+            await msg.answer("✅ تم مسح وصف الخدمة.", reply_markup=admin_main_keyboard())
+        return
+
+    if state["action"] in ("edit_minq", "edit_maxq"):
+        item, _, _ = find_item(state["target_id"])
+        if not item:
+            await msg.answer("⚠️ العنصر لم يعد موجوداً.")
+            admin_state.pop(ADMIN_ID, None)
+            return
+        try:
+            val = int(text.strip())
+            if val < 1:
+                raise ValueError
+        except ValueError:
+            await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
+            return
+        field = "min_qty" if state["action"] == "edit_minq" else "max_qty"
+        item[field] = val
+        save_menu()
+        admin_state.pop(ADMIN_ID, None)
+        label_ar = "الحد الأدنى" if field == "min_qty" else "الحد الأقصى"
+        warn = ""
+        cur_min = int(item.get("min_qty", 1))
+        cur_max = int(item.get("max_qty", 10000))
+        if cur_min > cur_max:
+            warn = f"\n⚠️ تنبيه: الحد الأدنى ({cur_min}) أكبر من الحد الأقصى ({cur_max}). الرجاء تعديل أحدهما."
+        await msg.answer(
+            f"✅ تم تحديث {label_ar} إلى: <b>{val}</b>{warn}",
+            parse_mode='HTML', reply_markup=admin_main_keyboard())
         return
 
     if state["action"] == "add_top":
@@ -871,7 +1103,7 @@ async def admin_input(msg: types.Message):
                 return
             if kind == "service_item":
                 state["step"] = 3
-                await msg.answer("📝 أرسل سعر الخدمة بالنقاط (رقم فقط):")
+                await msg.answer("📝 أرسل سعر الخدمة بالنقاط لكل وحدة (رقم فقط):")
                 return
             # daily_gift / referral / account / stats — لا نص ولا سعر
             new_item = {
@@ -909,9 +1141,52 @@ async def admin_input(msg: types.Message):
             except ValueError:
                 await msg.answer("⚠️ أرسل رقماً صحيحاً للسعر.")
                 return
+            state["tmp"]["price"] = price
+            state["step"] = 4
+            await msg.answer(
+                "📝 أرسل وصف الخدمة (يظهر للمشترك).\n"
+                "إذا لا تريد وصفاً أرسل: -"
+            )
+            return
+        if state["step"] == 4:
+            state["tmp"]["description"] = "" if text.strip() == "-" else text
+            state["step"] = 5
+            await msg.answer("📝 أرسل الحد الأدنى لعدد الرشق (رقم صحيح موجب، مثال: 100):")
+            return
+        if state["step"] == 5:
+            try:
+                min_q = int(text.strip())
+                if min_q < 1:
+                    raise ValueError
+            except ValueError:
+                await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
+                return
+            state["tmp"]["min_qty"] = min_q
+            state["step"] = 6
+            await msg.answer("📝 أرسل الحد الأقصى لعدد الرشق (رقم صحيح موجب، مثال: 10000):")
+            return
+        if state["step"] == 6:
+            try:
+                max_q = int(text.strip())
+                if max_q < 1:
+                    raise ValueError
+            except ValueError:
+                await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
+                return
+            min_q = int(state["tmp"].get("min_qty", 1))
+            if max_q < min_q:
+                await msg.answer(f"⚠️ الحد الأقصى يجب أن يكون ≥ الحد الأدنى ({min_q}). أعد الإرسال:")
+                return
             new_item = {
-                "id": new_id(), "label": state["tmp"]["label"],
-                "kind": "service_item", "text": "", "price": price, "children": [],
+                "id": new_id(),
+                "label": state["tmp"]["label"],
+                "kind": "service_item",
+                "text": "",
+                "price": int(state["tmp"]["price"]),
+                "description": state["tmp"].get("description", ""),
+                "min_qty": min_q,
+                "max_qty": max_q,
+                "children": [],
             }
             if state["where"] == "start":
                 menu.insert(0, new_item)
@@ -920,7 +1195,9 @@ async def admin_input(msg: types.Message):
             save_menu()
             admin_state.pop(ADMIN_ID, None)
             await msg.answer(
-                f"✅ تم إضافة الخدمة «{new_item['label']}» بسعر {price} نقطة.",
+                f"✅ تم إضافة الخدمة «{new_item['label']}»\n"
+                f"💰 السعر: {new_item['price']} نقطة/وحدة\n"
+                f"🔢 العدد: {min_q} – {max_q}",
                 reply_markup=admin_main_keyboard())
             return
 
@@ -934,7 +1211,7 @@ async def admin_input(msg: types.Message):
                 return
             if kind == "service_item":
                 state["step"] = 3
-                await msg.answer("📝 أرسل سعر الخدمة بالنقاط (رقم فقط):")
+                await msg.answer("📝 أرسل سعر الخدمة بالنقاط لكل وحدة (رقم فقط):")
                 return
             parent, _, _ = find_item(state["parent_id"])
             if parent is not None:
@@ -969,20 +1246,73 @@ async def admin_input(msg: types.Message):
             except ValueError:
                 await msg.answer("⚠️ أرسل رقماً صحيحاً للسعر.")
                 return
+            state["tmp"]["price"] = price
+            state["step"] = 4
+            await msg.answer(
+                "📝 أرسل وصف الخدمة (يظهر للمشترك).\n"
+                "إذا لا تريد وصفاً أرسل: -"
+            )
+            return
+        if state["step"] == 4:
+            state["tmp"]["description"] = "" if text.strip() == "-" else text
+            state["step"] = 5
+            await msg.answer("📝 أرسل الحد الأدنى لعدد الرشق (رقم صحيح موجب، مثال: 100):")
+            return
+        if state["step"] == 5:
+            try:
+                min_q = int(text.strip())
+                if min_q < 1:
+                    raise ValueError
+            except ValueError:
+                await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
+                return
+            state["tmp"]["min_qty"] = min_q
+            state["step"] = 6
+            await msg.answer("📝 أرسل الحد الأقصى لعدد الرشق (رقم صحيح موجب، مثال: 10000):")
+            return
+        if state["step"] == 6:
+            try:
+                max_q = int(text.strip())
+                if max_q < 1:
+                    raise ValueError
+            except ValueError:
+                await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
+                return
+            min_q = int(state["tmp"].get("min_qty", 1))
+            if max_q < min_q:
+                await msg.answer(f"⚠️ الحد الأقصى يجب أن يكون ≥ الحد الأدنى ({min_q}). أعد الإرسال:")
+                return
             parent, _, _ = find_item(state["parent_id"])
             if parent is not None:
                 parent.setdefault("children", []).append({
-                    "id": new_id(), "label": state["tmp"]["label"],
-                    "kind": "service_item", "text": "", "price": price, "children": [],
+                    "id": new_id(),
+                    "label": state["tmp"]["label"],
+                    "kind": "service_item",
+                    "text": "",
+                    "price": int(state["tmp"]["price"]),
+                    "description": state["tmp"].get("description", ""),
+                    "min_qty": min_q,
+                    "max_qty": max_q,
+                    "children": [],
                 })
                 save_menu()
                 await msg.answer(
-                    f"✅ تم إضافة الخدمة بسعر {price} نقطة.",
+                    f"✅ تم إضافة الخدمة بسعر {state['tmp']['price']} نقطة/وحدة\n"
+                    f"🔢 العدد: {min_q} – {max_q}",
                     reply_markup=admin_main_keyboard())
             else:
                 await msg.answer("⚠️ الزر الأب لم يعد موجوداً.")
             admin_state.pop(ADMIN_ID, None)
             return
+
+
+# ================================================================
+#       استقبال إدخال المستخدم (للطلبات: العدد ثم الرابط)
+# ================================================================
+# مهم: يجب أن يكون هذا المعالج بعد معالج المالك حتى لا يتعارضا
+@dp.message_handler(lambda m: m.from_user.id in user_state)
+async def user_order_input(msg: types.Message):
+    await _process_user_order(msg)
 
 
 # ================================================================
