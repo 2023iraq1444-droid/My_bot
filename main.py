@@ -16,6 +16,18 @@ ADMIN_ID = 5957783780
 MENU_FILE = 'menu.json'
 USERS_FILE = 'users.json'
 SETTINGS_FILE = 'settings.json'
+ASIA_FILE = 'asia_requests.json'
+
+ASIA_RECEIVER_NUMBER = "07726590999"
+ASIA_POINTS_PER_DOLLAR = 30000
+
+STARS_PACKAGES = [
+    {"stars": 1,   "points": 400,    "label": "⭐ نجمة واحدة"},
+    {"stars": 2,   "points": 800,    "label": "⭐⭐ نجمتان"},
+    {"stars": 10,  "points": 4000,   "label": "✨ ١٠ نجمات"},
+    {"stars": 50,  "points": 20000,  "label": "🌟 ٥٠ نجمة"},
+    {"stars": 100, "points": 40000,  "label": "💫 ١٠٠ نجمة"},
+]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -116,10 +128,10 @@ DEFAULT_MENU = [
         "id": "3", "label": "💳 شحن نقاط", "kind": "regular",
         "text": "💳 شحن النقاط\nاختر طريقة الشحن المناسبة لك:",
         "children": [
-            {"id": "31", "label": "⭐ النجوم", "kind": "regular",
-             "text": "⭐ الشحن عبر النجوم\n\n(اضغط زر تعديل الرد لتغيير هذا النص من لوحة الأدمن)", "children": []},
-            {"id": "32", "label": "📱 آسيا سيل", "kind": "regular",
-             "text": "📱 الشحن عبر آسيا سيل\n\n(اضغط زر تعديل الرد لتغيير هذا النص من لوحة الأدمن)", "children": []},
+            {"id": "31", "label": "⭐ النجوم", "kind": "stars_charge",
+             "text": "", "children": []},
+            {"id": "32", "label": "📱 آسيا سيل", "kind": "asiacell_charge",
+             "text": "", "children": []},
             {"id": "33", "label": "💵 بيناسي", "kind": "regular",
              "text": "💵 الشحن عبر بيناسي\n\n(اضغط زر تعديل الرد لتغيير هذا النص من لوحة الأدمن)", "children": []},
             {"id": "34", "label": "🔄 أخرى", "kind": "regular",
@@ -188,6 +200,27 @@ def _ensure_transfer_button(items):
     return True
 
 
+def _ensure_charge_kinds(items):
+    """ترقية القائمة القديمة: نضبط نوع زر النجوم وآسيا سيل تلقائياً."""
+    changed = False
+    for it in items:
+        label = (it.get("label") or "").strip()
+        kind = it.get("kind", "regular")
+        if kind == "regular":
+            if "نجوم" in label or "نجمة" in label or "النجوم" in label or "⭐" in label:
+                it["kind"] = "stars_charge"
+                it["children"] = []
+                changed = True
+            elif "آسيا" in label or "اسيا" in label or "آسياسيل" in label:
+                it["kind"] = "asiacell_charge"
+                it["children"] = []
+                changed = True
+        if it.get("children"):
+            if _ensure_charge_kinds(it["children"]):
+                changed = True
+    return changed
+
+
 def load_menu():
     if os.path.exists(MENU_FILE):
         try:
@@ -201,6 +234,7 @@ def load_menu():
                     return [json.loads(json.dumps(it)) for it in DEFAULT_MENU]
                 _ensure_kind(data)
                 _ensure_transfer_button(data)
+                _ensure_charge_kinds(data)
                 return data
         except Exception:
             pass
@@ -281,7 +315,40 @@ KIND_LABELS = {
     "account": "👤 الحساب (معلومات المستخدم)",
     "stats": "📊 الإحصائيات",
     "transfer": "💸 تحويل نقاط بين المستخدمين",
+    "stars_charge": "⭐ شحن عبر النجوم (Telegram Stars)",
+    "asiacell_charge": "📱 شحن عبر آسيا سيل",
 }
+
+
+# ================================================================
+#                    طلبات شحن آسيا سيل المعلقة
+# ================================================================
+
+def load_asia_requests():
+    if os.path.exists(ASIA_FILE):
+        try:
+            with open(ASIA_FILE, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+                return {str(k): v for k, v in raw.items()}
+        except Exception:
+            pass
+    return {}
+
+
+def save_asia_requests():
+    with open(ASIA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(asia_requests, f, ensure_ascii=False, indent=2)
+
+
+asia_requests = load_asia_requests()
+_next_asia_req = max([int(k) for k in asia_requests.keys()] + [1000]) + 1
+
+
+def new_asia_req_id() -> str:
+    global _next_asia_req
+    rid = str(_next_asia_req)
+    _next_asia_req += 1
+    return rid
 
 # حالة طلبات/عمليات المستخدمين
 # user_state[user_id] = {
@@ -385,7 +452,71 @@ async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
         )
         return True
 
+    if kind == "stars_charge":
+        await c.answer()
+        await c.message.answer(
+            stars_menu_text(user.id),
+            parse_mode='HTML',
+            reply_markup=stars_menu_keyboard(),
+        )
+        return True
+
+    if kind == "asiacell_charge":
+        user_state[user.id] = {"action": "asia_phone"}
+        await c.answer()
+        await c.message.answer(
+            f"📱 <b>الشحن عبر آسيا سيل</b>\n\n"
+            f"💱 السعر: كل <b>1$</b> رصيد آسيا سيل = <b>{ASIA_POINTS_PER_DOLLAR:,}</b> نقطة\n"
+            f"📞 رقم الاستلام: <code>{ASIA_RECEIVER_NUMBER}</code>\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"<b>الخطوة ١ من ٣:</b>\n"
+            f"📞 أرسل الآن رقم هاتفك في آسيا سيل (الذي ستحوّل منه):\n\n"
+            f"للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return True
+
     return False
+
+
+# ================================================================
+#                  واجهة شحن النجوم (Telegram Stars)
+# ================================================================
+
+def stars_menu_text(uid: int) -> str:
+    pts = get_points(uid)
+    lines = [
+        "⭐ <b>شحن النقاط عبر النجوم</b>",
+        "",
+        "اختر الباقة المناسبة لك واضغط عليها لإتمام الدفع داخل تيليجرام مباشرة.",
+        "",
+        "🎁 <b>الباقات المتوفرة:</b>",
+        "",
+    ]
+    for pkg in STARS_PACKAGES:
+        lines.append(
+            f"  ✦ <b>{pkg['stars']}</b> ⭐  =  <b>{pkg['points']:,}</b> نقطة"
+        )
+    lines.append("")
+    lines.append(f"💵 رصيدك الحالي: <b>{pts:,}</b> نقطة")
+    return "\n".join(lines)
+
+
+def stars_menu_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    row = []
+    for pkg in STARS_PACKAGES:
+        btn = types.InlineKeyboardButton(
+            f"{pkg['label']}  ←  {pkg['points']:,} نقطة",
+            callback_data=f"buy_stars:{pkg['stars']}",
+        )
+        row.append(btn)
+        if len(row) == 1:
+            kb.row(*row)
+            row = []
+    if row:
+        kb.row(*row)
+    return kb
 
 
 # ================================================================
@@ -565,6 +696,192 @@ def stats_text() -> str:
         f"💰 إجمالي النقاط: <b>{total_points}</b>\n\n"
         f"🏆 أعلى 5 مستخدمين:\n{top_text}"
     )
+
+
+# ================================================================
+#                ضغطات أزرار شراء النجوم (Telegram Stars)
+# ================================================================
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("buy_stars:"))
+async def cb_buy_stars(c: types.CallbackQuery):
+    register_user(c.from_user.id)
+    try:
+        stars = int(c.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await c.answer("⚠️ باقة غير صالحة.", show_alert=True)
+        return
+
+    pkg = next((p for p in STARS_PACKAGES if int(p["stars"]) == stars), None)
+    if not pkg:
+        await c.answer("⚠️ هذه الباقة غير متوفرة.", show_alert=True)
+        return
+
+    await c.answer()
+    try:
+        prices = [types.LabeledPrice(label=f"{pkg['points']:,} نقطة", amount=int(pkg["stars"]))]
+        await bot.send_invoice(
+            chat_id=c.from_user.id,
+            title=f"شحن {pkg['points']:,} نقطة",
+            description=f"احصل على {pkg['points']:,} نقطة فوراً مقابل {pkg['stars']} ⭐ نجمة تيليجرام.",
+            payload=f"stars_pkg:{pkg['stars']}:{pkg['points']}",
+            provider_token="",  # فارغ لـ Telegram Stars
+            currency="XTR",
+            prices=prices,
+            start_parameter=f"buy_{pkg['stars']}_stars",
+        )
+    except Exception as e:
+        logging.exception("send_invoice failed")
+        await c.message.answer(
+            f"⚠️ تعذر إنشاء فاتورة الدفع: {e}\n\n"
+            f"تأكد من أن إصدار aiogram يدعم عملة النجوم XTR، أو تواصل مع المالك."
+        )
+
+
+@dp.pre_checkout_query_handler(lambda q: True)
+async def pre_checkout(q: types.PreCheckoutQuery):
+    try:
+        await bot.answer_pre_checkout_query(q.id, ok=True)
+    except Exception as e:
+        logging.warning(f"pre_checkout error: {e}")
+        try:
+            await bot.answer_pre_checkout_query(q.id, ok=False, error_message="حدث خطأ، حاول مرة أخرى.")
+        except Exception:
+            pass
+
+
+@dp.message_handler(content_types=[types.ContentType.SUCCESSFUL_PAYMENT])
+async def on_successful_payment(msg: types.Message):
+    sp = msg.successful_payment
+    payload = sp.invoice_payload or ""
+    uid = msg.from_user.id
+    try:
+        parts = payload.split(":")
+        if len(parts) >= 3 and parts[0] == "stars_pkg":
+            stars_paid = int(parts[1])
+            points = int(parts[2])
+        else:
+            # حساب احتياطي اعتماداً على المبلغ المدفوع
+            stars_paid = int(sp.total_amount or 0)
+            pkg = next((p for p in STARS_PACKAGES if int(p["stars"]) == stars_paid), None)
+            points = int(pkg["points"]) if pkg else stars_paid * 400
+    except Exception:
+        stars_paid = int(sp.total_amount or 0)
+        points = stars_paid * 400
+
+    register_user(uid)
+    add_points(uid, points)
+    new_balance = get_points(uid)
+
+    await msg.answer(
+        f"✅ <b>تم الدفع بنجاح!</b>\n\n"
+        f"⭐ النجوم المدفوعة: <b>{stars_paid}</b>\n"
+        f"🎁 النقاط المضافة: <b>{points:,}</b>\n"
+        f"💵 رصيدك الآن: <b>{new_balance:,}</b> نقطة\n\n"
+        f"شكراً لشحنك! 💛",
+        parse_mode='HTML',
+        reply_markup=user_keyboard(),
+    )
+
+    try:
+        uname = f"@{msg.from_user.username}" if msg.from_user.username else (msg.from_user.first_name or "—")
+        await bot.send_message(
+            ADMIN_ID,
+            f"💰 <b>دفعة نجوم جديدة</b>\n\n"
+            f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+            f"⭐ نجوم: <b>{stars_paid}</b>\n"
+            f"🎁 نقاط مضافة: <b>{points:,}</b>\n"
+            f"💵 رصيده الآن: <b>{new_balance:,}</b>",
+            parse_mode='HTML',
+        )
+    except Exception:
+        pass
+
+
+# ================================================================
+#                  ضغطات اعتماد طلبات آسيا سيل (المالك)
+# ================================================================
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("asia:"))
+async def cb_asia_admin(c: types.CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        await c.answer("❌ هذا الزر للمالك فقط.", show_alert=True)
+        return
+
+    parts = c.data.split(":")
+    if len(parts) < 3:
+        await c.answer("⚠️ بيانات غير صالحة.", show_alert=True)
+        return
+
+    action = parts[1]   # approve | reject
+    rid = parts[2]
+
+    req = asia_requests.get(rid)
+    if not req:
+        await c.answer("⚠️ الطلب لم يعد موجوداً.", show_alert=True)
+        return
+
+    if req.get("status") != "pending":
+        await c.answer(f"تم التعامل مع هذا الطلب مسبقاً ({req.get('status')}).", show_alert=True)
+        return
+
+    target_uid = int(req["user_id"])
+    dollars = int(req["dollars"])
+    points = dollars * ASIA_POINTS_PER_DOLLAR
+
+    if action == "approve":
+        register_user(target_uid)
+        add_points(target_uid, points)
+        new_balance = get_points(target_uid)
+        req["status"] = "approved"
+        req["points_credited"] = points
+        save_asia_requests()
+
+        await c.answer("✅ تم الاعتماد")
+        try:
+            await c.message.edit_text(
+                c.message.html_text + f"\n\n✅ <b>تم الاعتماد</b>\n💰 أُضيفت <b>{points:,}</b> نقطة لرصيد المستخدم.",
+                parse_mode='HTML',
+            )
+        except Exception:
+            await c.message.answer(f"✅ تم اعتماد الطلب وإضافة {points:,} نقطة.")
+
+        try:
+            await bot.send_message(
+                target_uid,
+                f"✅ <b>تم تأكيد شحن آسيا سيل</b>\n\n"
+                f"💵 المبلغ: <b>{dollars}$</b>\n"
+                f"🎁 النقاط المضافة: <b>{points:,}</b>\n"
+                f"💰 رصيدك الآن: <b>{new_balance:,}</b> نقطة\n\n"
+                f"شكراً لشحنك! 💛",
+                parse_mode='HTML',
+            )
+        except Exception as e:
+            logging.warning(f"تعذر إشعار المستخدم: {e}")
+        return
+
+    if action == "reject":
+        req["status"] = "rejected"
+        save_asia_requests()
+        await c.answer("تم الرفض")
+        try:
+            await c.message.edit_text(
+                c.message.html_text + "\n\n❌ <b>تم رفض الطلب</b>",
+                parse_mode='HTML',
+            )
+        except Exception:
+            await c.message.answer("❌ تم رفض الطلب.")
+        try:
+            await bot.send_message(
+                target_uid,
+                f"❌ <b>تم رفض طلب شحن آسيا سيل</b>\n\n"
+                f"📞 الرقم المرسل منه: <code>{req.get('phone','')}</code>\n"
+                f"💵 المبلغ: <b>{req.get('dollars','')}$</b>\n\n"
+                f"إذا تعتقد أنه خطأ تواصل مع المالك.",
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+        return
 
 
 # ================================================================
@@ -968,6 +1285,110 @@ async def _process_user_flow(msg: types.Message) -> bool:
             except Exception as e:
                 logging.warning(f"تعذر إرسال إشعار للمالك: {e}")
             return True
+
+    # ----------------- شحن آسيا سيل -----------------
+    if state["action"] == "asia_phone":
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) < 10 or len(digits) > 15:
+            await msg.answer(
+                "⚠️ أرسل رقم هاتف صحيح (مثال: 07701234567)، أو /cancel للإلغاء."
+            )
+            return True
+        state["phone"] = digits
+        state["action"] = "asia_code"
+        await msg.answer(
+            f"✅ تم تسجيل الرقم: <code>{digits}</code>\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"<b>الخطوة ٢ من ٣:</b>\n"
+            f"📲 الآن قم بتحويل الرصيد من رقمك إلى الرقم التالي:\n"
+            f"<code>{ASIA_RECEIVER_NUMBER}</code>\n\n"
+            f"بعد تنفيذ التحويل سيصلك من آسيا سيل <b>كود تأكيد</b> برسالة نصية على هاتفك.\n"
+            f"📝 أرسل هذا الكود الآن:\n\n"
+            f"للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return True
+
+    if state["action"] == "asia_code":
+        code = "".join(ch for ch in text if ch.isalnum())
+        if len(code) < 3:
+            await msg.answer("⚠️ الكود قصير جداً. أعد إرساله أو /cancel للإلغاء.")
+            return True
+        state["code"] = code
+        state["action"] = "asia_amount"
+        await msg.answer(
+            f"✅ تم استلام الكود.\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"<b>الخطوة ٣ من ٣:</b>\n"
+            f"💵 أرسل الآن عدد الدولارات التي حوّلتها (رقم فقط):\n"
+            f"  • كل <b>1$</b> = <b>{ASIA_POINTS_PER_DOLLAR:,}</b> نقطة\n\n"
+            f"للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return True
+
+    if state["action"] == "asia_amount":
+        try:
+            dollars = int(text)
+            if dollars <= 0 or dollars > 10000:
+                raise ValueError
+        except ValueError:
+            await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (مثال: 5)، أو /cancel للإلغاء.")
+            return True
+
+        points = dollars * ASIA_POINTS_PER_DOLLAR
+        rid = new_asia_req_id()
+        asia_requests[rid] = {
+            "id": rid,
+            "user_id": uid,
+            "username": msg.from_user.username or "",
+            "first_name": msg.from_user.first_name or "",
+            "phone": state.get("phone", ""),
+            "code": state.get("code", ""),
+            "dollars": dollars,
+            "points": points,
+            "status": "pending",
+            "created_at": date.today().isoformat(),
+        }
+        save_asia_requests()
+        user_state.pop(uid, None)
+
+        await msg.answer(
+            f"✅ <b>تم استلام طلب الشحن</b>\n\n"
+            f"📞 رقمك: <code>{state.get('phone','')}</code>\n"
+            f"🔐 الكود: <code>{state.get('code','')}</code>\n"
+            f"💵 المبلغ: <b>{dollars}$</b>\n"
+            f"🎁 النقاط المتوقعة: <b>{points:,}</b>\n\n"
+            f"⏳ سيتم التحقق من وصول الرصيد إلى الرقم <code>{ASIA_RECEIVER_NUMBER}</code> "
+            f"وعند تأكيد الاستلام ستُضاف النقاط إلى رصيدك تلقائياً.",
+            parse_mode='HTML',
+            reply_markup=user_keyboard(),
+        )
+
+        # إشعار المالك مع أزرار اعتماد/رفض
+        try:
+            uname = f"@{msg.from_user.username}" if msg.from_user.username else (msg.from_user.first_name or "—")
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.row(
+                types.InlineKeyboardButton("✅ اعتماد وإضافة النقاط", callback_data=f"asia:approve:{rid}"),
+                types.InlineKeyboardButton("❌ رفض", callback_data=f"asia:reject:{rid}"),
+            )
+            await bot.send_message(
+                ADMIN_ID,
+                f"📱 <b>طلب شحن آسيا سيل جديد</b> #{rid}\n\n"
+                f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+                f"📞 رقمه: <code>{state.get('phone','')}</code>\n"
+                f"🔐 الكود: <code>{state.get('code','')}</code>\n"
+                f"💵 المبلغ: <b>{dollars}$</b>\n"
+                f"🎁 النقاط المطلوبة: <b>{points:,}</b>\n"
+                f"📥 رقم الاستلام: <code>{ASIA_RECEIVER_NUMBER}</code>\n\n"
+                f"تحقق من وصول المبلغ ثم اعتمد الطلب.",
+                parse_mode='HTML',
+                reply_markup=kb,
+            )
+        except Exception as e:
+            logging.warning(f"تعذر إشعار المالك بطلب آسيا: {e}")
+        return True
 
     # ----------------- تحويل النقاط -----------------
     if state["action"] == "transfer_id":
