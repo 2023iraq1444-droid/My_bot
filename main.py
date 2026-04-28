@@ -2,6 +2,7 @@ import json
 import os
 import random
 import logging
+import aiohttp
 from datetime import date
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -22,6 +23,49 @@ ASIA_FILE = 'asia_requests.json'
 ASIA_RECEIVER_NUMBER = "07726590999"
 ASIA_POINTS_PER_DOLLAR = 30000
 ASIA_DOLLAR_OPTIONS = [1, 2, 3, 5, 10, 15, 20, 30, 50, 75, 100]
+
+# ---------- SMMFollows API ----------
+SMMFOLLOWS_API_URL = os.getenv('SMMFOLLOWS_API_URL', 'https://smmfollows.com/api/v2')
+SMMFOLLOWS_API_KEY = os.getenv('SMMFOLLOWS_API_KEY', '')
+SMM_ORDERS_FILE = 'smm_orders.json'
+
+
+async def smm_api_call(payload: dict) -> dict:
+    """ينفّذ طلب POST إلى واجهة smmfollows ويعيد ردّ JSON.
+    إذا فشلت العملية يعيد {'error': '...'}.
+    """
+    if not SMMFOLLOWS_API_KEY:
+        return {"error": "SMMFOLLOWS_API_KEY غير مضبوط"}
+    data = {"key": SMMFOLLOWS_API_KEY, **payload}
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(SMMFOLLOWS_API_URL, data=data) as resp:
+                txt = await resp.text()
+                try:
+                    return json.loads(txt)
+                except Exception:
+                    return {"error": f"رد غير متوقع: {txt[:200]}"}
+    except Exception as e:
+        logging.warning(f"SMM API error: {e}")
+        return {"error": str(e)}
+
+
+async def smm_add_order(service_id: int, link: str, quantity: int) -> dict:
+    return await smm_api_call({
+        "action": "add",
+        "service": int(service_id),
+        "link": link,
+        "quantity": int(quantity),
+    })
+
+
+async def smm_order_status(order_id) -> dict:
+    return await smm_api_call({"action": "status", "order": int(order_id)})
+
+
+async def smm_balance() -> dict:
+    return await smm_api_call({"action": "balance"})
 
 STARS_PACKAGES = [
     {"stars": 1,   "points": 400,    "label": "⭐ نجمة واحدة"},
@@ -185,6 +229,9 @@ def _ensure_kind(items):
             if "max_qty" not in it:
                 it["max_qty"] = 10000
                 changed = True
+            if "smm_service_id" not in it:
+                it["smm_service_id"] = 0
+                changed = True
         if _ensure_kind(it["children"]):
             changed = True
     return changed
@@ -344,6 +391,25 @@ def save_asia_requests():
 
 asia_requests = load_asia_requests()
 _next_asia_req = max([int(k) for k in asia_requests.keys()] + [1000]) + 1
+
+
+# ---------- ذاكرة طلبات SMM ----------
+def load_smm_orders():
+    if os.path.exists(SMM_ORDERS_FILE):
+        try:
+            with open(SMM_ORDERS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_smm_orders():
+    with open(SMM_ORDERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(smm_orders, f, ensure_ascii=False, indent=2)
+
+
+smm_orders = load_smm_orders()
 
 
 def new_asia_req_id() -> str:
@@ -571,9 +637,13 @@ def admin_edit_keyboard(item):
         cur_min = item.get("min_qty", 1)
         cur_max = item.get("max_qty", 10000)
         cur_desc = (item.get("description") or "").strip()
+        cur_smm = int(item.get("smm_service_id", 0) or 0)
         desc_state = "✓ موجود" if cur_desc else "✗ غير موجود"
+        smm_state = f"الآن: {cur_smm}" if cur_smm else "✗ غير مربوط"
         kb.add(types.InlineKeyboardButton(
             f"💰 السعر/1000 (الآن: {cur_price})", callback_data=f"a:price:{item['id']}"))
+        kb.add(types.InlineKeyboardButton(
+            f"🆔 معرّف الخدمة في الموقع ({smm_state})", callback_data=f"a:smmid:{item['id']}"))
         kb.add(types.InlineKeyboardButton(
             f"📄 وصف الخدمة ({desc_state})", callback_data=f"a:desc:{item['id']}"))
         kb.add(types.InlineKeyboardButton(
@@ -700,6 +770,74 @@ async def cmd_cancel(msg: types.Message):
         await msg.answer("✅ تم إلغاء العملية.", reply_markup=user_keyboard())
     else:
         await msg.answer("لا توجد عملية جارية.", reply_markup=user_keyboard())
+
+
+# -------- أوامر SMM للمالك --------
+
+@dp.message_handler(commands=['smm_balance'])
+async def cmd_smm_balance(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    await msg.answer("⏳ جارٍ فحص الرصيد على الموقع...")
+    resp = await smm_balance()
+    if "balance" in resp:
+        bal = resp.get("balance", "?")
+        cur = resp.get("currency", "")
+        await msg.answer(f"💰 رصيدك في smmfollows:\n<b>{bal} {cur}</b>", parse_mode='HTML')
+    else:
+        err = resp.get("error", "خطأ غير معروف")
+        await msg.answer(f"❌ تعذر فحص الرصيد:\n<code>{err}</code>", parse_mode='HTML')
+
+
+@dp.message_handler(commands=['smm_status'])
+async def cmd_smm_status(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    args = (msg.get_args() or "").strip()
+    if not args:
+        await msg.answer("الاستعمال: <code>/smm_status &lt;رقم_الطلب&gt;</code>", parse_mode='HTML')
+        return
+    try:
+        oid = int(args)
+    except ValueError:
+        await msg.answer("⚠️ أرسل رقم طلب صحيح.")
+        return
+    await msg.answer(f"⏳ جارٍ فحص حالة الطلب <code>{oid}</code>...", parse_mode='HTML')
+    resp = await smm_order_status(oid)
+    if "status" in resp:
+        # تحديث الذاكرة المحلية إذا الطلب موجود
+        if str(oid) in smm_orders:
+            smm_orders[str(oid)]["status"] = resp.get("status", "?")
+            save_smm_orders()
+        info = (
+            f"🆔 الطلب: <code>{oid}</code>\n"
+            f"📊 الحالة: <b>{resp.get('status', '?')}</b>\n"
+            f"💵 التكلفة: {resp.get('charge', '?')} {resp.get('currency', '')}\n"
+            f"📈 العدد قبل البدء: {resp.get('start_count', '?')}\n"
+            f"⏳ المتبقي: {resp.get('remains', '?')}"
+        )
+        await msg.answer(info, parse_mode='HTML')
+    else:
+        err = resp.get("error", "خطأ غير معروف")
+        await msg.answer(f"❌ تعذر فحص الطلب:\n<code>{err}</code>", parse_mode='HTML')
+
+
+@dp.message_handler(commands=['smm_orders'])
+async def cmd_smm_orders(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    if not smm_orders:
+        await msg.answer("لا توجد طلبات SMM مسجلة بعد.")
+        return
+    items = sorted(smm_orders.values(), key=lambda x: int(x["order_id"]), reverse=True)[:15]
+    lines = ["📋 <b>آخر طلبات SMM</b>\n"]
+    for o in items:
+        lines.append(
+            f"🆔 <code>{o['order_id']}</code> | {o['service_label']}\n"
+            f"   👤 {o['user_id']} | 🔢 {o['quantity']} | 💰 {o['cost_points']}pt\n"
+            f"   📊 {o.get('status','?')} | 📅 {o.get('created_at','')}\n"
+        )
+    await msg.answer("\n".join(lines), parse_mode='HTML')
 
 
 def stats_text() -> str:
@@ -1189,6 +1327,7 @@ async def cb_admin(c: types.CallbackQuery):
             item.setdefault("description", "")
             item.setdefault("min_qty", 1)
             item.setdefault("max_qty", 10000)
+            item.setdefault("smm_service_id", 0)
         save_menu()
         await c.answer("✅ تم تغيير النوع")
         try:
@@ -1233,6 +1372,18 @@ async def cb_admin(c: types.CallbackQuery):
         await c.message.answer(
             "📝 أرسل وصف الخدمة (سيظهر للمشترك عند اختيار الخدمة).\n"
             "لمسح الوصف أرسل: -"
+        )
+        return
+
+    if action == "smmid":
+        item_id = parts[2]
+        admin_state[ADMIN_ID] = {"action": "edit_smmid", "target_id": item_id}
+        await c.answer()
+        await c.message.answer(
+            "📝 أرسل <b>معرّف الخدمة (Service ID)</b> من موقع smmfollows.\n"
+            "يكون رقم صحيح (مثال: <code>1234</code>).\n"
+            "للإلغاء وإزالة الربط أرسل: 0",
+            parse_mode='HTML',
         )
         return
 
@@ -1361,11 +1512,98 @@ async def _process_user_flow(msg: types.Message) -> bool:
                 user_state.pop(uid, None)
                 await msg.answer("❌ نقاطك لم تعد كافية لإتمام الطلب.", reply_markup=user_keyboard())
                 return True
+
+            # خصم النقاط مؤقتاً (سنُعيدها لو فشل الطلب على الموقع)
             u = users[uid]
             u["points"] = balance - total
             save_users()
             user_state.pop(uid, None)
 
+            smm_sid = int(item.get("smm_service_id", 0) or 0)
+            uname = f"@{msg.from_user.username}" if msg.from_user.username else "—"
+
+            # ===== الحالة الأولى: الخدمة مربوطة بـ smmfollows =====
+            if smm_sid > 0:
+                await msg.answer(
+                    "⏳ جارٍ إرسال طلبك إلى مزود الخدمة، يرجى الانتظار...",
+                )
+                resp = await smm_add_order(smm_sid, link, q)
+                if "order" in resp:
+                    order_id = str(resp["order"])
+                    smm_orders[order_id] = {
+                        "order_id": order_id,
+                        "user_id": uid,
+                        "username": msg.from_user.username or "",
+                        "service_label": item["label"],
+                        "smm_service_id": smm_sid,
+                        "link": link,
+                        "quantity": q,
+                        "cost_points": total,
+                        "status": "Pending",
+                        "created_at": date.today().isoformat(),
+                    }
+                    save_smm_orders()
+                    await msg.answer(
+                        f"✅ <b>تم تنفيذ طلبك بنجاح!</b>\n\n"
+                        f"🛒 الخدمة: {item['label']}\n"
+                        f"🔢 العدد: <b>{q}</b>\n"
+                        f"💰 التكلفة: <b>{total}</b> نقطة\n"
+                        f"🔗 الرابط: {link}\n"
+                        f"🆔 رقم الطلب: <code>{order_id}</code>\n"
+                        f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
+                        f"📦 سيبدأ التنفيذ خلال دقائق على موقع المزود.",
+                        parse_mode='HTML',
+                        reply_markup=user_keyboard(),
+                        disable_web_page_preview=True,
+                    )
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"🔔 <b>طلب رشق جديد (تلقائي)</b>\n\n"
+                            f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+                            f"🛒 الخدمة: {item['label']}\n"
+                            f"🔢 العدد: <b>{q}</b>\n"
+                            f"💰 التكلفة: <b>{total}</b> نقطة\n"
+                            f"🔗 الرابط: {link}\n"
+                            f"🆔 رقم طلب الموقع: <code>{order_id}</code>\n"
+                            f"💵 رصيد المستخدم بعد الخصم: {u['points']}",
+                            parse_mode='HTML',
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        logging.warning(f"تعذر إشعار المالك: {e}")
+                else:
+                    # فشل → نُعيد النقاط
+                    u["points"] = u["points"] + total
+                    save_users()
+                    err = resp.get("error", "خطأ غير معروف من الموقع")
+                    await msg.answer(
+                        f"❌ <b>تعذّر تنفيذ الطلب على الموقع</b>\n\n"
+                        f"السبب: {err}\n\n"
+                        f"💵 تم إعادة <b>{total}</b> نقطة إلى رصيدك.\n"
+                        f"رصيدك الحالي: <b>{u['points']}</b>",
+                        parse_mode='HTML',
+                        reply_markup=user_keyboard(),
+                    )
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"⚠️ <b>فشل طلب رشق</b>\n\n"
+                            f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+                            f"🛒 الخدمة: {item['label']}\n"
+                            f"🆔 معرّف الموقع: <code>{smm_sid}</code>\n"
+                            f"🔢 العدد: {q}\n"
+                            f"🔗 الرابط: {link}\n"
+                            f"❌ الخطأ: <code>{err}</code>\n"
+                            f"💵 تم إعادة {total} نقطة للمستخدم.",
+                            parse_mode='HTML',
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        logging.warning(f"تعذر إشعار المالك بالفشل: {e}")
+                return True
+
+            # ===== الحالة الثانية: تنفيذ يدوي (الخدمة غير مربوطة) =====
             await msg.answer(
                 f"✅ <b>تم استلام طلبك بنجاح</b>\n\n"
                 f"🛒 الخدمة: {item['label']}\n"
@@ -1373,29 +1611,26 @@ async def _process_user_flow(msg: types.Message) -> bool:
                 f"💰 التكلفة: <b>{total}</b> نقطة\n"
                 f"🔗 الرابط: {link}\n"
                 f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
-                f"📦 سيتم تنفيذ طلبك في أقرب وقت.",
+                f"📦 سيتم تنفيذ طلبك يدوياً قريباً.",
                 parse_mode='HTML',
                 reply_markup=user_keyboard(),
                 disable_web_page_preview=True,
             )
-
             try:
-                uname = f"@{msg.from_user.username}" if msg.from_user.username else "—"
                 await bot.send_message(
                     ADMIN_ID,
-                    f"🔔 <b>طلب جديد</b>\n\n"
+                    f"🔔 <b>طلب يدوي (الخدمة غير مربوطة بالموقع)</b>\n\n"
                     f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
                     f"🛒 الخدمة: {item['label']}\n"
                     f"🔢 العدد: <b>{q}</b>\n"
-                    f"💰 السعر/1000: {int(item.get('price', 0))} نقطة\n"
-                    f"💰 التكلفة الإجمالية: <b>{total}</b> نقطة\n"
+                    f"💰 التكلفة: <b>{total}</b> نقطة\n"
                     f"🔗 الرابط: {link}\n"
                     f"💵 رصيد المستخدم بعد الخصم: {u['points']}",
                     parse_mode='HTML',
                     disable_web_page_preview=True,
                 )
             except Exception as e:
-                logging.warning(f"تعذر إرسال إشعار للمالك: {e}")
+                logging.warning(f"تعذر إشعار المالك: {e}")
             return True
 
     # ----------------- شحن آسيا سيل -----------------
@@ -1762,6 +1997,33 @@ async def admin_input(msg: types.Message):
             await msg.answer("✅ تم مسح وصف الخدمة.", reply_markup=admin_main_keyboard())
         return
 
+    if state["action"] == "edit_smmid":
+        item, _, _ = find_item(state["target_id"])
+        if not item:
+            await msg.answer("⚠️ العنصر لم يعد موجوداً.")
+            admin_state.pop(ADMIN_ID, None)
+            return
+        try:
+            sid = int(text.strip())
+            if sid < 0:
+                raise ValueError
+        except ValueError:
+            await msg.answer("⚠️ أرسل رقماً صحيحاً (مثال: 1234)، أو 0 لإزالة الربط.")
+            return
+        item["smm_service_id"] = sid
+        save_menu()
+        admin_state.pop(ADMIN_ID, None)
+        if sid == 0:
+            await msg.answer("✅ تم إزالة الربط مع موقع smmfollows.\n"
+                             "الطلبات على هذه الخدمة ستحتاج تنفيذاً يدوياً منك.",
+                             reply_markup=admin_main_keyboard())
+        else:
+            await msg.answer(
+                f"✅ تم ربط الخدمة بمعرّف <code>{sid}</code> في smmfollows.\n"
+                f"الطلبات الجديدة ستُرسل تلقائياً إلى الموقع.",
+                parse_mode='HTML', reply_markup=admin_main_keyboard())
+        return
+
     if state["action"] in ("edit_minq", "edit_maxq"):
         item, _, _ = find_item(state["target_id"])
         if not item:
@@ -1840,16 +2102,33 @@ async def admin_input(msg: types.Message):
             state["tmp"]["price"] = price
             state["step"] = 4
             await msg.answer(
+                "🆔 أرسل <b>معرّف الخدمة (Service ID)</b> من موقع smmfollows.\n"
+                "هذا الرقم تجده أمام اسم الخدمة في صفحة Services.\n"
+                "إذا لم تربطها بالموقع وتريد تنفيذها يدوياً أرسل: <code>0</code>",
+                parse_mode='HTML',
+            )
+            return
+        if state["step"] == 4:
+            try:
+                sid = int(text.strip())
+                if sid < 0:
+                    raise ValueError
+            except ValueError:
+                await msg.answer("⚠️ أرسل رقماً صحيحاً، أو 0 إذا لا تريد ربط بالموقع.")
+                return
+            state["tmp"]["smm_service_id"] = sid
+            state["step"] = 5
+            await msg.answer(
                 "📝 أرسل وصف الخدمة (يظهر للمشترك).\n"
                 "إذا لا تريد وصفاً أرسل: -"
             )
             return
-        if state["step"] == 4:
+        if state["step"] == 5:
             state["tmp"]["description"] = "" if text.strip() == "-" else text
-            state["step"] = 5
+            state["step"] = 6
             await msg.answer("📝 أرسل الحد الأدنى لعدد الرشق (رقم صحيح موجب، مثال: 100):")
             return
-        if state["step"] == 5:
+        if state["step"] == 6:
             try:
                 min_q = int(text.strip())
                 if min_q < 1:
@@ -1858,10 +2137,10 @@ async def admin_input(msg: types.Message):
                 await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
                 return
             state["tmp"]["min_qty"] = min_q
-            state["step"] = 6
+            state["step"] = 7
             await msg.answer("📝 أرسل الحد الأقصى لعدد الرشق (رقم صحيح موجب، مثال: 10000):")
             return
-        if state["step"] == 6:
+        if state["step"] == 7:
             try:
                 max_q = int(text.strip())
                 if max_q < 1:
@@ -1879,6 +2158,7 @@ async def admin_input(msg: types.Message):
                 "kind": "service_item",
                 "text": "",
                 "price": int(state["tmp"]["price"]),
+                "smm_service_id": int(state["tmp"].get("smm_service_id", 0)),
                 "description": state["tmp"].get("description", ""),
                 "min_qty": min_q,
                 "max_qty": max_q,
@@ -1890,10 +2170,15 @@ async def admin_input(msg: types.Message):
                 menu.append(new_item)
             save_menu()
             admin_state.pop(ADMIN_ID, None)
+            sid_txt = (f"🆔 معرّف الموقع: <code>{new_item['smm_service_id']}</code>\n"
+                       if new_item['smm_service_id'] else
+                       "🆔 معرّف الموقع: غير مربوط (تنفيذ يدوي)\n")
             await msg.answer(
                 f"✅ تم إضافة الخدمة «{new_item['label']}»\n"
                 f"💰 السعر: {new_item['price']} نقطة لكل 1000\n"
+                f"{sid_txt}"
                 f"🔢 العدد: {min_q} – {max_q}",
+                parse_mode='HTML',
                 reply_markup=admin_main_keyboard())
             return
 
@@ -1945,16 +2230,33 @@ async def admin_input(msg: types.Message):
             state["tmp"]["price"] = price
             state["step"] = 4
             await msg.answer(
+                "🆔 أرسل <b>معرّف الخدمة (Service ID)</b> من موقع smmfollows.\n"
+                "هذا الرقم تجده أمام اسم الخدمة في صفحة Services.\n"
+                "إذا لم تربطها بالموقع وتريد تنفيذها يدوياً أرسل: <code>0</code>",
+                parse_mode='HTML',
+            )
+            return
+        if state["step"] == 4:
+            try:
+                sid = int(text.strip())
+                if sid < 0:
+                    raise ValueError
+            except ValueError:
+                await msg.answer("⚠️ أرسل رقماً صحيحاً، أو 0 إذا لا تريد ربط بالموقع.")
+                return
+            state["tmp"]["smm_service_id"] = sid
+            state["step"] = 5
+            await msg.answer(
                 "📝 أرسل وصف الخدمة (يظهر للمشترك).\n"
                 "إذا لا تريد وصفاً أرسل: -"
             )
             return
-        if state["step"] == 4:
+        if state["step"] == 5:
             state["tmp"]["description"] = "" if text.strip() == "-" else text
-            state["step"] = 5
+            state["step"] = 6
             await msg.answer("📝 أرسل الحد الأدنى لعدد الرشق (رقم صحيح موجب، مثال: 100):")
             return
-        if state["step"] == 5:
+        if state["step"] == 6:
             try:
                 min_q = int(text.strip())
                 if min_q < 1:
@@ -1963,10 +2265,10 @@ async def admin_input(msg: types.Message):
                 await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
                 return
             state["tmp"]["min_qty"] = min_q
-            state["step"] = 6
+            state["step"] = 7
             await msg.answer("📝 أرسل الحد الأقصى لعدد الرشق (رقم صحيح موجب، مثال: 10000):")
             return
-        if state["step"] == 6:
+        if state["step"] == 7:
             try:
                 max_q = int(text.strip())
                 if max_q < 1:
@@ -1980,21 +2282,28 @@ async def admin_input(msg: types.Message):
                 return
             parent, _, _ = find_item(state["parent_id"])
             if parent is not None:
+                smm_id = int(state["tmp"].get("smm_service_id", 0))
                 parent.setdefault("children", []).append({
                     "id": new_id(),
                     "label": state["tmp"]["label"],
                     "kind": "service_item",
                     "text": "",
                     "price": int(state["tmp"]["price"]),
+                    "smm_service_id": smm_id,
                     "description": state["tmp"].get("description", ""),
                     "min_qty": min_q,
                     "max_qty": max_q,
                     "children": [],
                 })
                 save_menu()
+                sid_txt = (f"🆔 معرّف الموقع: <code>{smm_id}</code>\n"
+                           if smm_id else
+                           "🆔 معرّف الموقع: غير مربوط (تنفيذ يدوي)\n")
                 await msg.answer(
                     f"✅ تم إضافة الخدمة بسعر {state['tmp']['price']} نقطة لكل 1000\n"
+                    f"{sid_txt}"
                     f"🔢 العدد: {min_q} – {max_q}",
+                    parse_mode='HTML',
                     reply_markup=admin_main_keyboard())
             else:
                 await msg.answer("⚠️ الزر الأب لم يعد موجوداً.")
