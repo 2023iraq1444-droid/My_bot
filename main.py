@@ -57,9 +57,6 @@ settings = load_settings()
 # ================================================================
 #                       المستخدمون (users)
 # ================================================================
-# users[user_id] = {"points": int, "last_daily": "YYYY-MM-DD",
-#                   "referred_by": int|None, "referrals": int}
-
 def load_users():
     if os.path.exists(USERS_FILE):
         try:
@@ -80,7 +77,6 @@ users = load_users()
 
 
 def register_user(user_id: int, referred_by: int | None = None) -> bool:
-    """Returns True if newly registered."""
     if user_id in users:
         return False
     users[user_id] = {
@@ -103,22 +99,16 @@ def get_points(user_id: int) -> int:
     return int(users.get(user_id, {}).get("points", 0))
 
 
+def calc_total(price_per_1000: int, qty: int) -> int:
+    """السعر لكل 1000 → نحسب التكلفة الإجمالية لعدد qty (تقريب لأعلى)."""
+    if price_per_1000 <= 0 or qty <= 0:
+        return 0
+    return (int(price_per_1000) * int(qty) + 999) // 1000
+
+
 # ================================================================
 #                         القائمة (menu)
 # ================================================================
-# كل عنصر:
-# {
-#   "id": "1",
-#   "label": "🎁 ...",
-#   "kind": "regular" | "daily_gift" | "referral" | "service_item" | "account" | "stats",
-#   "text": "...",          (للأنواع regular/recharge etc.)
-#   "price": 100,           (لـ service_item فقط — السعر لكل وحدة)
-#   "description": "...",   (لـ service_item فقط — وصف الخدمة)
-#   "min_qty": 100,         (لـ service_item فقط — الحد الأدنى للعدد)
-#   "max_qty": 10000,       (لـ service_item فقط — الحد الأقصى للعدد)
-#   "children": [...]
-# }
-
 DEFAULT_MENU = [
     {"id": "1", "label": "🎁 الهدية اليومية", "kind": "daily_gift", "text": "", "children": []},
     {"id": "2", "label": "🔗 رابط الدعوة", "kind": "referral", "text": "", "children": []},
@@ -151,6 +141,7 @@ DEFAULT_MENU = [
     {"id": "5", "label": "👑 مالك البوت", "kind": "regular",
      "text": "👑 مالك البوت\n\n(اضغط زر تعديل الرد لتغيير هذا النص من لوحة الأدمن)", "children": []},
     {"id": "6", "label": "👤 حسابي", "kind": "account", "text": "", "children": []},
+    {"id": "7", "label": "💸 تحويل نقاط", "kind": "transfer", "text": "", "children": []},
 ]
 
 
@@ -170,7 +161,6 @@ def _ensure_kind(items):
         if "children" not in it:
             it["children"] = []
             changed = True
-        # Backward-compat لخدمات قديمة بدون الحقول الجديدة
         if it.get("kind") == "service_item":
             if "description" not in it:
                 it["description"] = ""
@@ -186,20 +176,31 @@ def _ensure_kind(items):
     return changed
 
 
+def _ensure_transfer_button(items):
+    """نضمن وجود زر تحويل النقاط للمستخدمين القدامى."""
+    for it in items:
+        if it.get("kind") == "transfer":
+            return False
+    items.append({
+        "id": "7", "label": "💸 تحويل نقاط",
+        "kind": "transfer", "text": "", "children": []
+    })
+    return True
+
+
 def load_menu():
     if os.path.exists(MENU_FILE):
         try:
             with open(MENU_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # تحقق إن كانت قائمة قديمة بدون kind: نعيد التعيين للقائمة الجديدة
                 has_new_kinds = any(
                     it.get("kind") in ("daily_gift", "referral", "account")
                     for it in data
                 )
                 if not has_new_kinds:
-                    # القائمة قديمة — نستخدم الجديدة
                     return [json.loads(json.dumps(it)) for it in DEFAULT_MENU]
                 _ensure_kind(data)
+                _ensure_transfer_button(data)
                 return data
         except Exception:
             pass
@@ -236,7 +237,6 @@ def new_id():
 
 
 def find_item(item_id, items=None, parent=None):
-    """ابحث عن عنصر. ترجع (item, container_list, parent_item|None)."""
     if items is None:
         items = menu
     for it in items:
@@ -280,16 +280,19 @@ KIND_LABELS = {
     "service_item": "🛒 خدمة بسعر (يخصم نقاط)",
     "account": "👤 الحساب (معلومات المستخدم)",
     "stats": "📊 الإحصائيات",
+    "transfer": "💸 تحويل نقاط بين المستخدمين",
 }
 
-# حالة طلبات المستخدمين (لتسلسل: عدد → رابط)
-# user_state[user_id] = {"action": "order_qty"|"order_link", "service_id": str,
-#                        "qty": int, "total": int}
+# حالة طلبات/عمليات المستخدمين
+# user_state[user_id] = {
+#   "action": "order_qty"|"order_link"|"transfer_id"|"transfer_amount",
+#   "service_id": str, "qty": int, "total": int,
+#   "target_id": int
+# }
 user_state = {}
 
 
 async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
-    """يعالج الأنواع الخاصة. ترجع True إذا تم التعامل."""
     kind = item.get("kind", "regular")
     user = c.from_user
 
@@ -330,20 +333,20 @@ async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
 
     if kind == "service_item":
         price = int(item.get("price", 0))
-        desc = item.get("description", "") or ""
+        desc = (item.get("description") or "").strip()
         min_q = int(item.get("min_qty", 1))
         max_q = int(item.get("max_qty", 10000))
 
-        # نبدأ تسلسل الطلب: نطلب من المستخدم العدد
         user_state[user.id] = {"action": "order_qty", "service_id": item["id"]}
 
-        info = [f"🛒 <b>{item['label']}</b>"]
-        if desc.strip():
+        info = []
+        info.append(f"🛒 <b>اسم الخدمة:</b> {item['label']}")
+        info.append(f"💰 <b>سعر الخدمة:</b> {price} نقطة لكل 1000")
+        info.append(f"🔻 <b>الحد الأدنى:</b> {min_q}")
+        info.append(f"🔺 <b>الحد الأقصى:</b> {max_q}")
+        if desc:
             info.append(f"\n📄 <b>الوصف:</b>\n{desc}")
-        info.append(f"\n💰 السعر: <b>{price}</b> نقطة لكل وحدة")
-        info.append(f"🔢 العدد المسموح: من <b>{min_q}</b> إلى <b>{max_q}</b>")
-        balance = get_points(user.id)
-        info.append(f"💵 رصيدك الحالي: <b>{balance}</b> نقطة")
+        info.append(f"\n💵 رصيدك الحالي: <b>{get_points(user.id)}</b> نقطة")
         info.append(f"\n📝 أرسل الآن العدد المطلوب (رقم بين {min_q} و {max_q}):")
         info.append(f"للإلغاء أرسل /cancel")
 
@@ -369,6 +372,19 @@ async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
         await c.message.answer(stats_text(), parse_mode='HTML')
         return True
 
+    if kind == "transfer":
+        balance = get_points(user.id)
+        user_state[user.id] = {"action": "transfer_id"}
+        await c.answer()
+        await c.message.answer(
+            f"💸 <b>تحويل نقاط لمستخدم آخر</b>\n\n"
+            f"💵 رصيدك الحالي: <b>{balance}</b> نقطة\n\n"
+            f"📝 أرسل الآن <b>الايدي (ID)</b> الخاص بالشخص الذي تريد التحويل إليه:\n"
+            f"للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return True
+
     return False
 
 
@@ -385,6 +401,7 @@ def admin_main_keyboard():
             types.InlineKeyboardButton(f"✏️ {item['label']}", callback_data=f"a:edit:{item['id']}"),
             types.InlineKeyboardButton("🗑", callback_data=f"a:del:{item['id']}"),
         )
+    kb.add(types.InlineKeyboardButton("🎁 إهداء نقاط لمستخدم", callback_data="a:gift"))
     kb.add(types.InlineKeyboardButton("⚙️ الإعدادات العامة", callback_data="a:settings"))
     kb.add(types.InlineKeyboardButton("📊 إحصائيات البوت", callback_data="a:stats"))
     kb.add(types.InlineKeyboardButton("♻️ استعادة القائمة الافتراضية", callback_data="a:reset"))
@@ -402,16 +419,16 @@ def admin_edit_keyboard(item):
         cur_price = item.get("price", 0)
         cur_min = item.get("min_qty", 1)
         cur_max = item.get("max_qty", 10000)
-        cur_desc = item.get("description", "") or ""
-        desc_state = "✓ موجود" if cur_desc.strip() else "✗ غير موجود"
+        cur_desc = (item.get("description") or "").strip()
+        desc_state = "✓ موجود" if cur_desc else "✗ غير موجود"
         kb.add(types.InlineKeyboardButton(
-            f"💰 السعر/وحدة (الآن: {cur_price})", callback_data=f"a:price:{item['id']}"))
+            f"💰 السعر/1000 (الآن: {cur_price})", callback_data=f"a:price:{item['id']}"))
         kb.add(types.InlineKeyboardButton(
             f"📄 وصف الخدمة ({desc_state})", callback_data=f"a:desc:{item['id']}"))
         kb.add(types.InlineKeyboardButton(
-            f"🔻 الحد الأدنى للعدد (الآن: {cur_min})", callback_data=f"a:minq:{item['id']}"))
+            f"🔻 الحد الأدنى (الآن: {cur_min})", callback_data=f"a:minq:{item['id']}"))
         kb.add(types.InlineKeyboardButton(
-            f"🔺 الحد الأقصى للعدد (الآن: {cur_max})", callback_data=f"a:maxq:{item['id']}"))
+            f"🔺 الحد الأقصى (الآن: {cur_max})", callback_data=f"a:maxq:{item['id']}"))
     kb.add(types.InlineKeyboardButton("➕ إضافة زر فرعي", callback_data=f"a:addsub:{item['id']}"))
     if item.get("children"):
         for sub in item["children"]:
@@ -432,7 +449,6 @@ def kind_picker_keyboard(item_id):
 
 
 def kind_picker_for_new(prefix):
-    """prefix يحدد سياق الإنشاء: addtop_start | addtop_end | addsub_<parent>"""
     kb = types.InlineKeyboardMarkup(row_width=1)
     for k, label in KIND_LABELS.items():
         kb.add(types.InlineKeyboardButton(label, callback_data=f"a:newkind:{prefix}:{k}"))
@@ -461,7 +477,6 @@ admin_state = {}
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(msg: types.Message):
-    # إلغاء أي طلب جارٍ للمستخدم عند البدء من جديد
     user_state.pop(msg.from_user.id, None)
 
     args = msg.get_args() or ""
@@ -474,7 +489,6 @@ async def cmd_start(msg: types.Message):
 
     is_new = register_user(msg.from_user.id, referred_by=referred_by)
 
-    # منح نقاط للمُحيل إن وُجد وكان مستخدماً جديداً
     if is_new and referred_by and referred_by != msg.from_user.id:
         ref_pts = int(settings.get("referral_points", 200))
         ref_user = users.setdefault(referred_by, {"points": 0, "last_daily": "", "referred_by": None, "referrals": 0})
@@ -524,7 +538,6 @@ async def cmd_admin(msg: types.Message):
 
 @dp.message_handler(commands=['cancel'])
 async def cmd_cancel(msg: types.Message):
-    """إلغاء أي عملية جارية (طلب مستخدم أو حالة مالك)."""
     cancelled = False
     if msg.from_user.id in user_state:
         user_state.pop(msg.from_user.id, None)
@@ -567,8 +580,8 @@ async def cb_user(c: types.CallbackQuery):
         await c.answer("⚠️ هذا الزر لم يعد متوفراً.", show_alert=True)
         return
 
-    # إذا كان المستخدم في منتصف طلب خدمة وضغط زر آخر — نلغي الطلب السابق
-    if c.from_user.id in user_state and item.get("kind") != "service_item":
+    # إذا ضغط زر آخر أثناء عملية جارية → نلغي العملية السابقة
+    if c.from_user.id in user_state and item.get("kind") not in ("service_item", "transfer"):
         user_state.pop(c.from_user.id, None)
 
     if await handle_special_kind(c, item):
@@ -644,6 +657,17 @@ async def cb_admin(c: types.CallbackQuery):
         await c.message.answer(f"📝 أرسل العدد الجديد لنقاط الإحالة (الحالي: {settings['referral_points']}):")
         return
 
+    if action == "gift":
+        admin_state[ADMIN_ID] = {"action": "gift_id"}
+        await c.answer()
+        await c.message.answer(
+            "🎁 <b>إهداء نقاط لمستخدم</b>\n\n"
+            "📝 أرسل ايدي (ID) المستخدم الذي تريد إهداءه نقاط:\n"
+            "للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return
+
     if action == "reset":
         admin_state[ADMIN_ID] = {"action": "confirm_reset"}
         await c.answer()
@@ -666,7 +690,6 @@ async def cb_admin(c: types.CallbackQuery):
         return
 
     if action == "newkind":
-        # parts: ["a", "newkind", "addtop_start"|"addtop_end"|"addsub_<id>", "<kind>"]
         prefix = parts[2]
         kind = parts[3]
         if prefix.startswith("addsub_"):
@@ -771,7 +794,7 @@ async def cb_admin(c: types.CallbackQuery):
         item_id = parts[2]
         admin_state[ADMIN_ID] = {"action": "edit_price", "target_id": item_id}
         await c.answer()
-        await c.message.answer("📝 أرسل السعر الجديد بالنقاط لكل وحدة (رقم فقط):")
+        await c.message.answer("📝 أرسل السعر الجديد بالنقاط لكل 1000 (رقم فقط):")
         return
 
     if action == "desc":
@@ -831,11 +854,11 @@ async def cb_admin(c: types.CallbackQuery):
 
 
 # ================================================================
-#                 استقبال إدخال المستخدم أثناء الطلب
+#                 استقبال إدخال المستخدم أثناء العمليات
 # ================================================================
 
-async def _process_user_order(msg: types.Message) -> bool:
-    """يعالج رسالة المستخدم إذا كان في تسلسل طلب خدمة. ترجع True إذا تمت المعالجة."""
+async def _process_user_flow(msg: types.Message) -> bool:
+    """يعالج رسائل المستخدم في تسلسل طلب خدمة أو تحويل نقاط."""
     uid = msg.from_user.id
     if uid not in user_state:
         return False
@@ -845,106 +868,194 @@ async def _process_user_order(msg: types.Message) -> bool:
 
     if text in ("/cancel", "إلغاء"):
         user_state.pop(uid, None)
-        await msg.answer("❌ تم إلغاء الطلب.", reply_markup=user_keyboard())
+        await msg.answer("❌ تم إلغاء العملية.", reply_markup=user_keyboard())
         return True
 
-    item, _, _ = find_item(state.get("service_id", ""))
-    if not item or item.get("kind") != "service_item":
-        user_state.pop(uid, None)
-        await msg.answer("⚠️ الخدمة لم تعد متوفرة.", reply_markup=user_keyboard())
-        return True
-
-    if state["action"] == "order_qty":
-        try:
-            q = int(text)
-        except ValueError:
-            await msg.answer("⚠️ أرسل رقماً صحيحاً للعدد، أو /cancel للإلغاء.")
+    # ----------------- طلب خدمة -----------------
+    if state["action"] in ("order_qty", "order_link"):
+        item, _, _ = find_item(state.get("service_id", ""))
+        if not item or item.get("kind") != "service_item":
+            user_state.pop(uid, None)
+            await msg.answer("⚠️ الخدمة لم تعد متوفرة.", reply_markup=user_keyboard())
             return True
-        min_q = int(item.get("min_qty", 1))
-        max_q = int(item.get("max_qty", 10000))
-        if q < min_q or q > max_q:
+
+        if state["action"] == "order_qty":
+            try:
+                q = int(text)
+            except ValueError:
+                await msg.answer("⚠️ أرسل رقماً صحيحاً للعدد، أو /cancel للإلغاء.")
+                return True
+            min_q = int(item.get("min_qty", 1))
+            max_q = int(item.get("max_qty", 10000))
+            if q < min_q or q > max_q:
+                await msg.answer(
+                    f"⚠️ يجب أن يكون العدد بين <b>{min_q}</b> و <b>{max_q}</b>.\n"
+                    f"حاول مرة أخرى أو أرسل /cancel للإلغاء.",
+                    parse_mode='HTML',
+                )
+                return True
+            price = int(item.get("price", 0))
+            total = calc_total(price, q)
+            balance = get_points(uid)
+            if balance < total:
+                user_state.pop(uid, None)
+                await msg.answer(
+                    f"❌ نقاطك غير كافية!\n"
+                    f"العدد المطلوب: <b>{q}</b>\n"
+                    f"التكلفة الإجمالية: <b>{total}</b> نقطة\n"
+                    f"رصيدك الحالي: <b>{balance}</b> نقطة",
+                    parse_mode='HTML',
+                    reply_markup=user_keyboard(),
+                )
+                return True
+            state["action"] = "order_link"
+            state["qty"] = q
+            state["total"] = total
             await msg.answer(
-                f"⚠️ يجب أن يكون العدد بين <b>{min_q}</b> و <b>{max_q}</b>.\n"
-                f"حاول مرة أخرى أو أرسل /cancel للإلغاء.",
+                f"✅ تم اختيار العدد: <b>{q}</b>\n"
+                f"💰 التكلفة الإجمالية: <b>{total}</b> نقطة\n\n"
+                f"🔗 الآن أرسل رابط الحساب أو المنشور المطلوب:\n"
+                f"للإلغاء أرسل /cancel",
                 parse_mode='HTML',
             )
             return True
-        price = int(item.get("price", 0))
-        total = price * q
-        balance = get_points(uid)
-        if balance < total:
+
+        if state["action"] == "order_link":
+            link = text
+            if not link or len(link) < 4:
+                await msg.answer("⚠️ أرسل رابطاً صحيحاً، أو /cancel للإلغاء.")
+                return True
+            q = int(state.get("qty", 0))
+            total = int(state.get("total", 0))
+            balance = get_points(uid)
+            if balance < total:
+                user_state.pop(uid, None)
+                await msg.answer("❌ نقاطك لم تعد كافية لإتمام الطلب.", reply_markup=user_keyboard())
+                return True
+            u = users[uid]
+            u["points"] = balance - total
+            save_users()
             user_state.pop(uid, None)
+
             await msg.answer(
-                f"❌ نقاطك غير كافية!\n"
-                f"العدد المطلوب: <b>{q}</b>\n"
-                f"التكلفة الإجمالية: <b>{total}</b> نقطة\n"
-                f"رصيدك الحالي: <b>{balance}</b> نقطة",
+                f"✅ <b>تم استلام طلبك بنجاح</b>\n\n"
+                f"🛒 الخدمة: {item['label']}\n"
+                f"🔢 العدد: <b>{q}</b>\n"
+                f"💰 التكلفة: <b>{total}</b> نقطة\n"
+                f"🔗 الرابط: {link}\n"
+                f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
+                f"📦 سيتم تنفيذ طلبك في أقرب وقت.",
                 parse_mode='HTML',
                 reply_markup=user_keyboard(),
+                disable_web_page_preview=True,
+            )
+
+            try:
+                uname = f"@{msg.from_user.username}" if msg.from_user.username else "—"
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🔔 <b>طلب جديد</b>\n\n"
+                    f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+                    f"🛒 الخدمة: {item['label']}\n"
+                    f"🔢 العدد: <b>{q}</b>\n"
+                    f"💰 السعر/1000: {int(item.get('price', 0))} نقطة\n"
+                    f"💰 التكلفة الإجمالية: <b>{total}</b> نقطة\n"
+                    f"🔗 الرابط: {link}\n"
+                    f"💵 رصيد المستخدم بعد الخصم: {u['points']}",
+                    parse_mode='HTML',
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logging.warning(f"تعذر إرسال إشعار للمالك: {e}")
+            return True
+
+    # ----------------- تحويل النقاط -----------------
+    if state["action"] == "transfer_id":
+        try:
+            target_id = int(text)
+        except ValueError:
+            await msg.answer("⚠️ أرسل ايدي صحيح (أرقام فقط)، أو /cancel للإلغاء.")
+            return True
+        if target_id == uid:
+            await msg.answer("⚠️ لا يمكنك التحويل لنفسك. أرسل ايدي مختلف أو /cancel للإلغاء.")
+            return True
+        if target_id not in users:
+            await msg.answer(
+                "⚠️ هذا المستخدم لم يستخدم البوت من قبل.\n"
+                "تأكد من الايدي وأعد الإرسال، أو /cancel للإلغاء."
             )
             return True
-        # نسجل العدد وننتقل لطلب الرابط
-        state["action"] = "order_link"
-        state["qty"] = q
-        state["total"] = total
+        state["action"] = "transfer_amount"
+        state["target_id"] = target_id
         await msg.answer(
-            f"✅ تم اختيار العدد: <b>{q}</b>\n"
-            f"💰 التكلفة الإجمالية: <b>{total}</b> نقطة\n\n"
-            f"🔗 الآن أرسل رابط الحساب أو المنشور المطلوب:\n"
+            f"✅ تم اختيار المستخدم: <code>{target_id}</code>\n\n"
+            f"💵 رصيدك الحالي: <b>{get_points(uid)}</b> نقطة\n"
+            f"📝 الآن أرسل عدد النقاط التي تريد تحويلها (رقم فقط):\n"
             f"للإلغاء أرسل /cancel",
             parse_mode='HTML',
         )
         return True
 
-    if state["action"] == "order_link":
-        link = text
-        if not link or len(link) < 4:
-            await msg.answer("⚠️ أرسل رابطاً صحيحاً، أو /cancel للإلغاء.")
+    if state["action"] == "transfer_amount":
+        try:
+            amount = int(text)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً، أو /cancel للإلغاء.")
             return True
-        q = int(state.get("qty", 0))
-        total = int(state.get("total", 0))
         balance = get_points(uid)
-        if balance < total:
-            user_state.pop(uid, None)
-            await msg.answer("❌ نقاطك لم تعد كافية لإتمام الطلب.", reply_markup=user_keyboard())
+        if amount > balance:
+            await msg.answer(
+                f"❌ رصيدك غير كافٍ.\n"
+                f"رصيدك: {balance} | المطلوب: {amount}\n"
+                f"أرسل عدداً أقل أو /cancel للإلغاء."
+            )
             return True
-        # خصم النقاط وإغلاق الحالة
-        u = users[uid]
-        u["points"] = balance - total
+        target_id = int(state["target_id"])
+        if target_id not in users:
+            user_state.pop(uid, None)
+            await msg.answer("⚠️ المستخدم المستهدف لم يعد موجوداً.", reply_markup=user_keyboard())
+            return True
+        # تنفيذ التحويل
+        users[uid]["points"] = balance - amount
+        users[target_id]["points"] = int(users[target_id].get("points", 0)) + amount
         save_users()
         user_state.pop(uid, None)
 
         await msg.answer(
-            f"✅ <b>تم استلام طلبك بنجاح</b>\n\n"
-            f"🛒 الخدمة: {item['label']}\n"
-            f"🔢 العدد: <b>{q}</b>\n"
-            f"💰 التكلفة: <b>{total}</b> نقطة\n"
-            f"🔗 الرابط: {link}\n"
-            f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
-            f"📦 سيتم تنفيذ طلبك في أقرب وقت.",
+            f"✅ <b>تم التحويل بنجاح</b>\n\n"
+            f"👤 إلى: <code>{target_id}</code>\n"
+            f"💸 المبلغ: <b>{amount}</b> نقطة\n"
+            f"💵 رصيدك الآن: <b>{users[uid]['points']}</b> نقطة",
             parse_mode='HTML',
             reply_markup=user_keyboard(),
-            disable_web_page_preview=True,
         )
-
-        # إشعار المالك بكامل تفاصيل الطلب
+        # إشعار المستلم
         try:
-            uname = f"@{msg.from_user.username}" if msg.from_user.username else "—"
+            sender_name = f"@{msg.from_user.username}" if msg.from_user.username else (msg.from_user.first_name or "مستخدم")
             await bot.send_message(
-                ADMIN_ID,
-                f"🔔 <b>طلب جديد</b>\n\n"
-                f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
-                f"🛒 الخدمة: {item['label']}\n"
-                f"🔢 العدد: <b>{q}</b>\n"
-                f"💰 السعر/وحدة: {int(item.get('price', 0))} نقطة\n"
-                f"💰 التكلفة الإجمالية: <b>{total}</b> نقطة\n"
-                f"🔗 الرابط: {link}\n"
-                f"💵 رصيد المستخدم بعد الخصم: {u['points']}",
+                target_id,
+                f"🎉 <b>وصلتك نقاط!</b>\n\n"
+                f"👤 من: <code>{uid}</code> ({sender_name})\n"
+                f"💸 المبلغ: <b>{amount}</b> نقطة\n"
+                f"💵 رصيدك الآن: <b>{users[target_id]['points']}</b> نقطة",
                 parse_mode='HTML',
-                disable_web_page_preview=True,
             )
         except Exception as e:
-            logging.warning(f"تعذر إرسال إشعار للمالك: {e}")
+            logging.warning(f"تعذر إشعار المستلم: {e}")
+        # إشعار المالك
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"💸 <b>تحويل نقاط بين مستخدمين</b>\n\n"
+                f"👤 من: <code>{uid}</code>\n"
+                f"👤 إلى: <code>{target_id}</code>\n"
+                f"💰 المبلغ: <b>{amount}</b> نقطة",
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
         return True
 
     return False
@@ -992,6 +1103,80 @@ async def admin_input(msg: types.Message):
         admin_state.pop(ADMIN_ID, None)
         await msg.answer(f"✅ تم تحديث نقاط الإحالة إلى: <b>{val}</b>",
                          parse_mode='HTML', reply_markup=admin_main_keyboard())
+        return
+
+    if state["action"] == "gift_id":
+        try:
+            target_id = int(text.strip())
+        except ValueError:
+            await msg.answer("⚠️ أرسل ايدي صحيح (أرقام فقط)، أو /cancel للإلغاء.")
+            return
+        state["action"] = "gift_amount"
+        state["target_id"] = target_id
+        target_balance = get_points(target_id)
+        exists_note = "✓ المستخدم موجود في قاعدة البيانات" if target_id in users else "⚠️ المستخدم غير مسجل في البوت — سيُسجَّل تلقائياً"
+        await msg.answer(
+            f"👤 المستخدم: <code>{target_id}</code>\n"
+            f"💰 رصيده الحالي: <b>{target_balance}</b> نقطة\n"
+            f"{exists_note}\n\n"
+            f"📝 الآن أرسل عدد النقاط التي تريد إهداءها (رقم صحيح، يمكن أن يكون سالباً للخصم):\n"
+            f"للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return
+
+    if state["action"] == "gift_amount":
+        try:
+            amount = int(text.strip())
+            if amount == 0:
+                raise ValueError
+        except ValueError:
+            await msg.answer("⚠️ أرسل رقماً صحيحاً غير صفر، أو /cancel للإلغاء.")
+            return
+        target_id = int(state["target_id"])
+        # تسجيل المستخدم إن لم يكن موجوداً
+        if target_id not in users:
+            register_user(target_id)
+        # تطبيق الإضافة/الخصم مع منع الرصيد السالب
+        cur = int(users[target_id].get("points", 0))
+        new_balance = cur + amount
+        if new_balance < 0:
+            await msg.answer(
+                f"⚠️ لا يمكن خصم هذا المبلغ — رصيد المستخدم {cur}.\n"
+                f"أرسل قيمة أصغر أو /cancel للإلغاء."
+            )
+            return
+        users[target_id]["points"] = new_balance
+        save_users()
+        admin_state.pop(ADMIN_ID, None)
+
+        action_word = "إهداء" if amount > 0 else "خصم"
+        await msg.answer(
+            f"✅ تم {action_word} <b>{abs(amount)}</b> نقطة\n"
+            f"👤 المستخدم: <code>{target_id}</code>\n"
+            f"💵 رصيده الآن: <b>{new_balance}</b> نقطة",
+            parse_mode='HTML',
+            reply_markup=admin_main_keyboard(),
+        )
+        # إشعار المستخدم
+        try:
+            if amount > 0:
+                await bot.send_message(
+                    target_id,
+                    f"🎁 <b>هدية من المالك!</b>\n\n"
+                    f"💰 حصلت على: <b>{amount}</b> نقطة\n"
+                    f"💵 رصيدك الآن: <b>{new_balance}</b> نقطة",
+                    parse_mode='HTML',
+                )
+            else:
+                await bot.send_message(
+                    target_id,
+                    f"⚠️ تم خصم <b>{abs(amount)}</b> نقطة من رصيدك من قبل المالك.\n"
+                    f"💵 رصيدك الآن: <b>{new_balance}</b> نقطة",
+                    parse_mode='HTML',
+                )
+        except Exception as e:
+            logging.warning(f"تعذر إشعار المستخدم: {e}")
         return
 
     if state["action"] == "confirm_reset":
@@ -1045,7 +1230,7 @@ async def admin_input(msg: types.Message):
         item["price"] = val
         save_menu()
         admin_state.pop(ADMIN_ID, None)
-        await msg.answer(f"✅ تم تحديث السعر إلى: <b>{val}</b> نقطة لكل وحدة",
+        await msg.answer(f"✅ تم تحديث السعر إلى: <b>{val}</b> نقطة لكل 1000",
                          parse_mode='HTML', reply_markup=admin_main_keyboard())
         return
 
@@ -1103,9 +1288,8 @@ async def admin_input(msg: types.Message):
                 return
             if kind == "service_item":
                 state["step"] = 3
-                await msg.answer("📝 أرسل سعر الخدمة بالنقاط لكل وحدة (رقم فقط):")
+                await msg.answer("📝 أرسل سعر الخدمة بالنقاط لكل 1000 (رقم فقط):")
                 return
-            # daily_gift / referral / account / stats — لا نص ولا سعر
             new_item = {
                 "id": new_id(), "label": state["tmp"]["label"],
                 "kind": kind, "text": "", "children": [],
@@ -1196,7 +1380,7 @@ async def admin_input(msg: types.Message):
             admin_state.pop(ADMIN_ID, None)
             await msg.answer(
                 f"✅ تم إضافة الخدمة «{new_item['label']}»\n"
-                f"💰 السعر: {new_item['price']} نقطة/وحدة\n"
+                f"💰 السعر: {new_item['price']} نقطة لكل 1000\n"
                 f"🔢 العدد: {min_q} – {max_q}",
                 reply_markup=admin_main_keyboard())
             return
@@ -1211,7 +1395,7 @@ async def admin_input(msg: types.Message):
                 return
             if kind == "service_item":
                 state["step"] = 3
-                await msg.answer("📝 أرسل سعر الخدمة بالنقاط لكل وحدة (رقم فقط):")
+                await msg.answer("📝 أرسل سعر الخدمة بالنقاط لكل 1000 (رقم فقط):")
                 return
             parent, _, _ = find_item(state["parent_id"])
             if parent is not None:
@@ -1297,7 +1481,7 @@ async def admin_input(msg: types.Message):
                 })
                 save_menu()
                 await msg.answer(
-                    f"✅ تم إضافة الخدمة بسعر {state['tmp']['price']} نقطة/وحدة\n"
+                    f"✅ تم إضافة الخدمة بسعر {state['tmp']['price']} نقطة لكل 1000\n"
                     f"🔢 العدد: {min_q} – {max_q}",
                     reply_markup=admin_main_keyboard())
             else:
@@ -1307,12 +1491,11 @@ async def admin_input(msg: types.Message):
 
 
 # ================================================================
-#       استقبال إدخال المستخدم (للطلبات: العدد ثم الرابط)
+#       استقبال إدخال المستخدم (للطلبات والتحويل)
 # ================================================================
-# مهم: يجب أن يكون هذا المعالج بعد معالج المالك حتى لا يتعارضا
 @dp.message_handler(lambda m: m.from_user.id in user_state)
-async def user_order_input(msg: types.Message):
-    await _process_user_order(msg)
+async def user_flow_input(msg: types.Message):
+    await _process_user_flow(msg)
 
 
 # ================================================================
