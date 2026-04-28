@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import logging
 from datetime import date
 from aiogram import Bot, Dispatcher, types
@@ -20,6 +21,7 @@ ASIA_FILE = 'asia_requests.json'
 
 ASIA_RECEIVER_NUMBER = "07726590999"
 ASIA_POINTS_PER_DOLLAR = 30000
+ASIA_DOLLAR_OPTIONS = [1, 2, 3, 5, 10, 15, 20, 30, 50, 75, 100]
 
 STARS_PACKAGES = [
     {"stars": 1,   "points": 400,    "label": "⭐ نجمة واحدة"},
@@ -466,11 +468,10 @@ async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
         await c.answer()
         await c.message.answer(
             f"📱 <b>الشحن عبر آسيا سيل</b>\n\n"
-            f"💱 السعر: كل <b>1$</b> رصيد آسيا سيل = <b>{ASIA_POINTS_PER_DOLLAR:,}</b> نقطة\n"
-            f"📞 رقم الاستلام: <code>{ASIA_RECEIVER_NUMBER}</code>\n\n"
+            f"💱 السعر: كل <b>1$</b> رصيد آسيا سيل = <b>{ASIA_POINTS_PER_DOLLAR:,}</b> نقطة\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"<b>الخطوة ١ من ٣:</b>\n"
-            f"📞 أرسل الآن رقم هاتفك في آسيا سيل (الذي ستحوّل منه):\n\n"
+            f"<b>الخطوة ١:</b> 📞 أرسل رقم هاتفك في آسيا سيل\n"
+            f"(مثال: <code>07701234567</code>)\n\n"
             f"للإلغاء أرسل /cancel",
             parse_mode='HTML',
         )
@@ -516,6 +517,25 @@ def stars_menu_keyboard():
             row = []
     if row:
         kb.row(*row)
+    return kb
+
+
+def asia_amount_keyboard():
+    """أزرار اختيار مبلغ شحن آسيا سيل بالدولار."""
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    row = []
+    for d in ASIA_DOLLAR_OPTIONS:
+        pts = d * ASIA_POINTS_PER_DOLLAR
+        row.append(types.InlineKeyboardButton(
+            f"{d}$ • {pts:,}",
+            callback_data=f"asia_amt:{d}",
+        ))
+        if len(row) == 3:
+            kb.row(*row)
+            row = []
+    if row:
+        kb.row(*row)
+    kb.add(types.InlineKeyboardButton("❌ إلغاء", callback_data="asia_amt:cancel"))
     return kb
 
 
@@ -882,6 +902,98 @@ async def cb_asia_admin(c: types.CallbackQuery):
         except Exception:
             pass
         return
+
+
+# ================================================================
+#               ضغطات أزرار اختيار مبلغ آسيا سيل
+# ================================================================
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("asia_amt:"))
+async def cb_asia_amount(c: types.CallbackQuery):
+    register_user(c.from_user.id)
+    uid = c.from_user.id
+    val = c.data.split(":", 1)[1]
+
+    if val == "cancel":
+        user_state.pop(uid, None)
+        await c.answer("تم الإلغاء")
+        try:
+            await c.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await c.message.answer("❌ تم إلغاء عملية شحن آسيا سيل.", reply_markup=user_keyboard())
+        return
+
+    state = user_state.get(uid)
+    if not state or state.get("action") != "asia_pick":
+        await c.answer("⚠️ هذه الجلسة منتهية. ابدأ من زر آسيا سيل من جديد.", show_alert=True)
+        return
+
+    try:
+        dollars = int(val)
+    except ValueError:
+        await c.answer("⚠️ مبلغ غير صالح.", show_alert=True)
+        return
+
+    if dollars not in ASIA_DOLLAR_OPTIONS:
+        await c.answer("⚠️ مبلغ غير متوفر.", show_alert=True)
+        return
+
+    points = dollars * ASIA_POINTS_PER_DOLLAR
+    rid = new_asia_req_id()
+    asia_requests[rid] = {
+        "id": rid,
+        "user_id": uid,
+        "username": c.from_user.username or "",
+        "first_name": c.from_user.first_name or "",
+        "phone": state.get("phone", ""),
+        "verify_code": state.get("verify_code", ""),
+        "dollars": dollars,
+        "points": points,
+        "status": "pending",
+        "created_at": date.today().isoformat(),
+    }
+    save_asia_requests()
+    user_state.pop(uid, None)
+
+    await c.answer("✅ تم استلام طلبك")
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await c.message.answer(
+        f"✅ <b>تم استلام طلب الشحن</b>\n\n"
+        f"📞 رقمك: <code>{state.get('phone','')}</code>\n"
+        f"💵 المبلغ: <b>{dollars}$</b>\n"
+        f"🎁 النقاط المتوقعة: <b>{points:,}</b>\n\n"
+        f"⏳ سيتم اعتماد الطلب قريباً وإضافة النقاط إلى رصيدك تلقائياً.",
+        parse_mode='HTML',
+        reply_markup=user_keyboard(),
+    )
+
+    # إشعار المالك للاعتماد
+    try:
+        uname = f"@{c.from_user.username}" if c.from_user.username else (c.from_user.first_name or "—")
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.row(
+            types.InlineKeyboardButton("✅ اعتماد وإضافة النقاط", callback_data=f"asia:approve:{rid}"),
+            types.InlineKeyboardButton("❌ رفض", callback_data=f"asia:reject:{rid}"),
+        )
+        await bot.send_message(
+            ADMIN_ID,
+            f"📱 <b>طلب شحن آسيا سيل جديد</b> #{rid}\n\n"
+            f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+            f"📞 رقمه: <code>{state.get('phone','')}</code>\n"
+            f"🔐 كود التحقق المُستخدم: <code>{state.get('verify_code','')}</code>\n"
+            f"💵 المبلغ: <b>{dollars}$</b>\n"
+            f"🎁 النقاط المطلوبة: <b>{points:,}</b>\n\n"
+            f"اضغط اعتماد بعد التأكد من وصول الرصيد.",
+            parse_mode='HTML',
+            reply_markup=kb,
+        )
+    except Exception as e:
+        logging.warning(f"تعذر إشعار المالك بطلب آسيا: {e}")
 
 
 # ================================================================
@@ -1294,100 +1406,79 @@ async def _process_user_flow(msg: types.Message) -> bool:
                 "⚠️ أرسل رقم هاتف صحيح (مثال: 07701234567)، أو /cancel للإلغاء."
             )
             return True
+
+        # توليد كود تحقق (٥ أرقام)
+        verify_code = f"{random.randint(10000, 99999)}"
         state["phone"] = digits
-        state["action"] = "asia_code"
+        state["verify_code"] = verify_code
+        state["verify_attempts"] = 0
+        state["action"] = "asia_verify"
+
+        # إشعار المالك بالكود ليُرسله للمستخدم عبر آسيا سيل
+        try:
+            uname = f"@{msg.from_user.username}" if msg.from_user.username else (msg.from_user.first_name or "—")
+            await bot.send_message(
+                ADMIN_ID,
+                f"🔐 <b>كود تحقق آسيا سيل</b>\n\n"
+                f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
+                f"📞 رقمه: <code>{digits}</code>\n"
+                f"🔢 الكود: <code>{verify_code}</code>\n\n"
+                f"📲 أرسل هذا الكود إلى رقم المستخدم عبر آسيا سيل.",
+                parse_mode='HTML',
+            )
+        except Exception as e:
+            logging.warning(f"تعذر إشعار المالك بكود التحقق: {e}")
+
         await msg.answer(
             f"✅ تم تسجيل الرقم: <code>{digits}</code>\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"<b>الخطوة ٢ من ٣:</b>\n"
-            f"📲 الآن قم بتحويل الرصيد من رقمك إلى الرقم التالي:\n"
-            f"<code>{ASIA_RECEIVER_NUMBER}</code>\n\n"
-            f"بعد تنفيذ التحويل سيصلك من آسيا سيل <b>كود تأكيد</b> برسالة نصية على هاتفك.\n"
-            f"📝 أرسل هذا الكود الآن:\n\n"
+            f"<b>الخطوة ٢:</b> 📲 سيصلك خلال لحظات <b>كود تحقق</b> من آسيا سيل على رقمك.\n\n"
+            f"🔢 أرسل الكود الذي وصلك:\n\n"
             f"للإلغاء أرسل /cancel",
             parse_mode='HTML',
         )
         return True
 
-    if state["action"] == "asia_code":
-        code = "".join(ch for ch in text if ch.isalnum())
-        if len(code) < 3:
-            await msg.answer("⚠️ الكود قصير جداً. أعد إرساله أو /cancel للإلغاء.")
+    if state["action"] == "asia_verify":
+        entered = "".join(ch for ch in text if ch.isdigit())
+        expected = state.get("verify_code", "")
+        state["verify_attempts"] = int(state.get("verify_attempts", 0)) + 1
+
+        if entered != expected:
+            if state["verify_attempts"] >= 3:
+                user_state.pop(uid, None)
+                await msg.answer(
+                    "❌ تم تجاوز عدد المحاولات.\n"
+                    "ابدأ من جديد من زر <b>آسيا سيل</b>.",
+                    parse_mode='HTML',
+                    reply_markup=user_keyboard(),
+                )
+                return True
+            await msg.answer(
+                f"⚠️ الكود غير صحيح. حاول مرة أخرى "
+                f"(المحاولات المتبقية: {3 - state['verify_attempts']})\n"
+                f"أو أرسل /cancel للإلغاء."
+            )
             return True
-        state["code"] = code
-        state["action"] = "asia_amount"
+
+        # نجح التحقق → عرض أزرار اختيار المبلغ
+        state["action"] = "asia_pick"
         await msg.answer(
-            f"✅ تم استلام الكود.\n\n"
+            f"✅ <b>تم التحقق بنجاح!</b>\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"<b>الخطوة ٣ من ٣:</b>\n"
-            f"💵 أرسل الآن عدد الدولارات التي حوّلتها (رقم فقط):\n"
-            f"  • كل <b>1$</b> = <b>{ASIA_POINTS_PER_DOLLAR:,}</b> نقطة\n\n"
-            f"للإلغاء أرسل /cancel",
+            f"<b>الخطوة ٣:</b> 💵 اختر مبلغ الشحن:\n"
+            f"  • كل <b>1$</b> = <b>{ASIA_POINTS_PER_DOLLAR:,}</b> نقطة",
             parse_mode='HTML',
+            reply_markup=asia_amount_keyboard(),
         )
         return True
 
-    if state["action"] == "asia_amount":
-        try:
-            dollars = int(text)
-            if dollars <= 0 or dollars > 10000:
-                raise ValueError
-        except ValueError:
-            await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (مثال: 5)، أو /cancel للإلغاء.")
-            return True
-
-        points = dollars * ASIA_POINTS_PER_DOLLAR
-        rid = new_asia_req_id()
-        asia_requests[rid] = {
-            "id": rid,
-            "user_id": uid,
-            "username": msg.from_user.username or "",
-            "first_name": msg.from_user.first_name or "",
-            "phone": state.get("phone", ""),
-            "code": state.get("code", ""),
-            "dollars": dollars,
-            "points": points,
-            "status": "pending",
-            "created_at": date.today().isoformat(),
-        }
-        save_asia_requests()
-        user_state.pop(uid, None)
-
+    if state["action"] == "asia_pick":
+        # المستخدم يجب أن يضغط زر؛ نذكّره بذلك
         await msg.answer(
-            f"✅ <b>تم استلام طلب الشحن</b>\n\n"
-            f"📞 رقمك: <code>{state.get('phone','')}</code>\n"
-            f"🔐 الكود: <code>{state.get('code','')}</code>\n"
-            f"💵 المبلغ: <b>{dollars}$</b>\n"
-            f"🎁 النقاط المتوقعة: <b>{points:,}</b>\n\n"
-            f"⏳ سيتم التحقق من وصول الرصيد إلى الرقم <code>{ASIA_RECEIVER_NUMBER}</code> "
-            f"وعند تأكيد الاستلام ستُضاف النقاط إلى رصيدك تلقائياً.",
-            parse_mode='HTML',
-            reply_markup=user_keyboard(),
+            "📌 الرجاء اختيار المبلغ من الأزرار في الأعلى، أو أرسل /cancel للإلغاء.",
+            reply_markup=asia_amount_keyboard(),
         )
-
-        # إشعار المالك مع أزرار اعتماد/رفض
-        try:
-            uname = f"@{msg.from_user.username}" if msg.from_user.username else (msg.from_user.first_name or "—")
-            kb = types.InlineKeyboardMarkup(row_width=2)
-            kb.row(
-                types.InlineKeyboardButton("✅ اعتماد وإضافة النقاط", callback_data=f"asia:approve:{rid}"),
-                types.InlineKeyboardButton("❌ رفض", callback_data=f"asia:reject:{rid}"),
-            )
-            await bot.send_message(
-                ADMIN_ID,
-                f"📱 <b>طلب شحن آسيا سيل جديد</b> #{rid}\n\n"
-                f"👤 المستخدم: <code>{uid}</code> ({uname})\n"
-                f"📞 رقمه: <code>{state.get('phone','')}</code>\n"
-                f"🔐 الكود: <code>{state.get('code','')}</code>\n"
-                f"💵 المبلغ: <b>{dollars}$</b>\n"
-                f"🎁 النقاط المطلوبة: <b>{points:,}</b>\n"
-                f"📥 رقم الاستلام: <code>{ASIA_RECEIVER_NUMBER}</code>\n\n"
-                f"تحقق من وصول المبلغ ثم اعتمد الطلب.",
-                parse_mode='HTML',
-                reply_markup=kb,
-            )
-        except Exception as e:
-            logging.warning(f"تعذر إشعار المالك بطلب آسيا: {e}")
         return True
 
     # ----------------- تحويل النقاط -----------------
