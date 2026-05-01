@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import io
@@ -30,6 +31,80 @@ ADMINS_FILE = 'admins.json'
 ASIA_RECEIVER_NUMBER_DEFAULT = "07726590999"
 ASIA_POINTS_PER_DOLLAR_DEFAULT = 30000
 ASIA_DOLLAR_OPTIONS = [1, 2, 3, 5, 10, 15, 20, 30, 50, 75, 100]
+
+# ================================================================
+#                      نظام تعدد اللغات
+# ================================================================
+SUPPORTED_LANGS = {"ar": "🇸🇦 العربية", "en": "🇬🇧 English", "ru": "🇷🇺 Русский"}
+
+TRANSLATIONS = {
+    # ─── عام ───
+    "lang_name":        {"ar": "🇸🇦 العربية", "en": "🇬🇧 English", "ru": "🇷🇺 Русский"},
+    "choose_lang":      {"ar": "🌐 اختر لغتك:", "en": "🌐 Choose your language:", "ru": "🌐 Выберите язык:"},
+    "lang_saved":       {"ar": "✅ تم تغيير اللغة إلى العربية.", "en": "✅ Language changed to English.", "ru": "✅ Язык изменён на Русский."},
+    "cancel_op":        {"ar": "❌ تم إلغاء العملية.", "en": "❌ Operation cancelled.", "ru": "❌ Операция отменена."},
+    "cancel_hint":      {"ar": "للإلغاء أرسل /cancel", "en": "Send /cancel to cancel.", "ru": "Для отмены отправьте /cancel"},
+
+    # ─── الترحيب والقائمة ───
+    "back":             {"ar": "⬅️ رجوع", "en": "⬅️ Back", "ru": "⬅️ Назад"},
+    "balance_label":    {"ar": "💵 رصيدك:", "en": "💵 Balance:", "ru": "💵 Баланс:"},
+    "points_unit":      {"ar": "نقطة", "en": "pts", "ru": "очков"},
+
+    # ─── طلبات الخدمة ───
+    "enter_qty":        {"ar": "🔢 أرسل الكمية المطلوبة (بين {min} و {max}):", "en": "🔢 Enter quantity (between {min} and {max}):", "ru": "🔢 Введите количество (от {min} до {max}):"},
+    "enter_link":       {"ar": "🔗 الآن أرسل رابط الحساب أو المنشور:", "en": "🔗 Now send the account or post link:", "ru": "🔗 Теперь отправьте ссылку на аккаунт или публикацию:"},
+    "not_enough_pts":   {"ar": "❌ نقاطك غير كافية!\nالتكلفة: {cost} | رصيدك: {bal}", "en": "❌ Not enough points!\nCost: {cost} | Balance: {bal}", "ru": "❌ Недостаточно очков!\nСтоимость: {cost} | Баланс: {bal}"},
+    "qty_out_range":    {"ar": "⚠️ الكمية يجب أن تكون بين {min} و {max}.", "en": "⚠️ Quantity must be between {min} and {max}.", "ru": "⚠️ Количество должно быть от {min} до {max}."},
+    "order_started":    {"ar": "✅ تم بدأ الطلب!\n\n🛒 الخدمة: {svc}\n🔢 الكمية: {qty}\n💰 التكلفة: {cost} {unit}\n💵 رصيدك: {bal} {unit}", "en": "✅ Order started!\n\n🛒 Service: {svc}\n🔢 Quantity: {qty}\n💰 Cost: {cost} {unit}\n💵 Balance: {bal} {unit}", "ru": "✅ Заказ начат!\n\n🛒 Услуга: {svc}\n🔢 Количество: {qty}\n💰 Стоимость: {cost} {unit}\n💵 Баланс: {bal} {unit}"},
+    "order_desc_title": {"ar": "📄 تفاصيل الخدمة:", "en": "📄 Service details:", "ru": "📄 Детали услуги:"},
+    "order_failed":     {"ar": "⚠️ هناك مشكلة، يرجى المحاولة لاحقاً.\n\n💵 تم إعادة {cost} {unit} إلى رصيدك.\nرصيدك: {bal} {unit}", "en": "⚠️ An error occurred, please try later.\n\n💵 {cost} {unit} refunded.\nBalance: {bal} {unit}", "ru": "⚠️ Произошла ошибка, попробуйте позже.\n\n💵 {cost} {unit} возвращено.\nБаланс: {bal} {unit}"},
+    "order_id_label":   {"ar": "🆔 رقم الطلب:", "en": "🆔 Order ID:", "ru": "🆔 Номер заказа:"},
+    "order_manual_ok":  {"ar": "✅ تم استلام طلبك!\n\n🛒 الخدمة: {svc}\n🔢 الكمية: {qty}\n💰 التكلفة: {cost} {unit}\n💵 رصيدك: {bal} {unit}\n\n📦 سيتم التنفيذ يدوياً قريباً.", "en": "✅ Order received!\n\n🛒 Service: {svc}\n🔢 Quantity: {qty}\n💰 Cost: {cost} {unit}\n💵 Balance: {bal} {unit}\n\n📦 Will be processed manually soon.", "ru": "✅ Заказ принят!\n\n🛒 Услуга: {svc}\n🔢 Количество: {qty}\n💰 Стоимость: {cost} {unit}\n💵 Баланс: {bal} {unit}\n\n📦 Будет обработан вручную."},
+    "order_completed":  {"ar": "🎉 تم اكتمال طلبك!\n\n🛒 الخدمة: {svc}\n🔢 الكمية: {qty}\n🆔 رقم الطلب: {oid}", "en": "🎉 Your order is completed!\n\n🛒 Service: {svc}\n🔢 Quantity: {qty}\n🆔 Order ID: {oid}", "ru": "🎉 Ваш заказ выполнен!\n\n🛒 Услуга: {svc}\n🔢 Количество: {qty}\n🆔 Номер заказа: {oid}"},
+    "order_partial":    {"ar": "⚠️ تم تنفيذ طلبك جزئياً.\n🆔 رقم الطلب: {oid}", "en": "⚠️ Your order was partially completed.\n🆔 Order ID: {oid}", "ru": "⚠️ Ваш заказ выполнен частично.\n🆔 Номер заказа: {oid}"},
+
+    # ─── الرصيد والهدية ───
+    "daily_gift":       {"ar": "🎁 هديتك اليومية: {pts} {unit}!\n💵 رصيدك الآن: {bal} {unit}", "en": "🎁 Daily gift: {pts} {unit}!\n💵 Balance: {bal} {unit}", "ru": "🎁 Ежедневный подарок: {pts} {unit}!\n💵 Баланс: {bal} {unit}"},
+    "gift_wait":        {"ar": "⏳ يمكنك استلام الهدية بعد {hrs} ساعة و{mins} دقيقة.", "en": "⏳ You can get the next gift in {hrs}h {mins}m.", "ru": "⏳ Следующий подарок через {hrs}ч {mins}мин."},
+    "referral_link":    {"ar": "🔗 رابط دعوتك:", "en": "🔗 Your referral link:", "ru": "🔗 Ваша реферальная ссылка:"},
+    "referral_bonus":   {"ar": "🎉 حصلت على {pts} {unit} بسبب دعوتك لـ {name}!", "en": "🎉 You earned {pts} {unit} for inviting {name}!", "ru": "🎉 Вы получили {pts} {unit} за приглашение {name}!"},
+
+    # ─── التحويل ───
+    "transfer_enter_id":   {"ar": "👤 أرسل معرّف المستخدم الذي تريد التحويل إليه:", "en": "👤 Send the user ID to transfer to:", "ru": "👤 Отправьте ID пользователя для перевода:"},
+    "transfer_enter_amt":  {"ar": "💰 كم نقطة تريد تحويلها؟ (رصيدك: {bal})", "en": "💰 How many points to transfer? (Balance: {bal})", "ru": "💰 Сколько очков перевести? (Баланс: {bal})"},
+    "transfer_ok":         {"ar": "✅ تم تحويل {pts} {unit} إلى {name}.\nرصيدك الآن: {bal} {unit}", "en": "✅ Transferred {pts} {unit} to {name}.\nBalance: {bal} {unit}", "ru": "✅ Переведено {pts} {unit} пользователю {name}.\nБаланс: {bal} {unit}"},
+    "transfer_received":   {"ar": "💸 استلمت {pts} {unit} من {name}.\nرصيدك الآن: {bal} {unit}", "en": "💸 Received {pts} {unit} from {name}.\nBalance: {bal} {unit}", "ru": "💸 Получено {pts} {unit} от {name}.\nБаланс: {bal} {unit}"},
+    "transfer_not_enough": {"ar": "❌ رصيدك غير كافٍ. رصيدك: {bal} {unit}", "en": "❌ Not enough points. Balance: {bal} {unit}", "ru": "❌ Недостаточно очков. Баланс: {bal} {unit}"},
+    "user_not_found":      {"ar": "❌ المستخدم غير موجود.", "en": "❌ User not found.", "ru": "❌ Пользователь не найден."},
+    "change_language":     {"ar": "🌐 تغيير اللغة", "en": "🌐 Change Language", "ru": "🌐 Изменить язык"},
+}
+
+
+def get_lang(uid) -> str:
+    """يعيد رمز لغة المستخدم (ar/en/ru)."""
+    return users.get(str(uid), {}).get("lang", "ar")
+
+
+def t(key: str, uid_or_lang, **kwargs) -> str:
+    """يترجم مفتاحاً حسب لغة المستخدم."""
+    lang = uid_or_lang if isinstance(uid_or_lang, str) else get_lang(uid_or_lang)
+    if lang not in SUPPORTED_LANGS:
+        lang = "ar"
+    text = TRANSLATIONS.get(key, {}).get(lang) or TRANSLATIONS.get(key, {}).get("ar", key)
+    if kwargs:
+        try:
+            text = text.format(**kwargs)
+        except Exception:
+            pass
+    return text
+
+
+def lang_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for code, name in SUPPORTED_LANGS.items():
+        kb.add(types.InlineKeyboardButton(name, callback_data=f"setlang:{code}"))
+    return kb
+
 
 # ================================================================
 #                مزوّدات SMM (smmfollows + JustAnotherPanel)
@@ -1269,15 +1344,23 @@ async def handle_special_kind(c: types.CallbackQuery, item) -> bool:
     if kind == "account":
         pts = get_points(user.id)
         refs = int(users.get(user.id, {}).get("referrals", 0))
+        lang = get_lang(user.id)
+        lang_display = SUPPORTED_LANGS.get(lang, "🇸🇦 العربية")
+        acc_kb = types.InlineKeyboardMarkup()
+        acc_kb.add(types.InlineKeyboardButton(
+            t("change_language", lang), callback_data="lang_pick"
+        ))
         await c.answer()
         await c.message.answer(
             decorate(
                 f"👤 <b>حسابك</b>\n\n"
                 f"🆔 الايدي: <code>{user.id}</code>\n"
                 f"💰 النقاط: <b>{maybe_spoiler(str(pts))}</b>\n"
-                f"👥 عدد الدعوات: <b>{refs}</b>"
+                f"👥 عدد الدعوات: <b>{refs}</b>\n"
+                f"🌐 اللغة: {lang_display}"
             ),
             parse_mode='HTML',
+            reply_markup=acc_kb,
         )
         return True
 
@@ -2630,19 +2713,20 @@ async def _process_user_flow(msg: types.Message) -> bool:
                     }
                     save_smm_orders()
                     svc_desc = (item.get("description") or "").strip()
+                    lang = get_lang(uid)
+                    unit = t("points_unit", lang)
                     desc_section = (
-                        f"\n\n📄 <b>تفاصيل الخدمة:</b>\n<blockquote expandable>{svc_desc}</blockquote>"
+                        f"\n\n<b>{t('order_desc_title', lang)}</b>\n"
+                        f"<blockquote expandable>{svc_desc}</blockquote>"
                         if svc_desc else ""
                     )
                     await msg.answer(
-                        f"✅ <b>تم تنفيذ طلبك بنجاح!</b>\n\n"
-                        f"🛒 الخدمة: {item['label']}\n"
-                        f"🔢 العدد: <b>{q}</b>\n"
-                        f"💰 التكلفة: <b>{total}</b> نقطة\n"
-                        f"🔗 الرابط: {link}\n"
-                        f"🆔 رقم الطلب: <code>{order_id}</code>\n"
-                        f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة"
-                        f"{desc_section}",
+                        t("order_started", lang,
+                          svc=item['label'], qty=q,
+                          cost=total, bal=u['points'], unit=unit)
+                        + f"\n🔗 {link}"
+                        + f"\n{t('order_id_label', lang)} <code>{order_id}</code>"
+                        + desc_section,
                         parse_mode='HTML',
                         reply_markup=user_keyboard(),
                         disable_web_page_preview=True,
@@ -2667,11 +2751,12 @@ async def _process_user_flow(msg: types.Message) -> bool:
                 else:
                     u["points"] = u["points"] + total
                     save_users()
-                    err = resp.get("error", "خطأ غير معروف من الموقع")
+                    err = resp.get("error", "")
+                    lang = get_lang(uid)
                     await msg.answer(
-                        f"⚠️ <b>هناك مشكلة، يرجى المحاولة لاحقاً.</b>\n\n"
-                        f"💵 تم إعادة <b>{total}</b> نقطة إلى رصيدك.\n"
-                        f"رصيدك الحالي: <b>{u['points']}</b>",
+                        t("order_failed", lang,
+                          cost=total, bal=u['points'],
+                          unit=t("points_unit", lang)),
                         parse_mode='HTML',
                         reply_markup=user_keyboard(),
                     )
@@ -2696,19 +2781,19 @@ async def _process_user_flow(msg: types.Message) -> bool:
 
             # ===== حالة: تنفيذ يدوي =====
             svc_desc_m = (item.get("description") or "").strip()
+            lang = get_lang(uid)
+            unit = t("points_unit", lang)
             desc_section_m = (
-                f"\n\n📄 <b>تفاصيل الخدمة:</b>\n<blockquote expandable>{svc_desc_m}</blockquote>"
+                f"\n\n<b>{t('order_desc_title', lang)}</b>\n"
+                f"<blockquote expandable>{svc_desc_m}</blockquote>"
                 if svc_desc_m else ""
             )
             await msg.answer(
-                f"✅ <b>تم استلام طلبك بنجاح</b>\n\n"
-                f"🛒 الخدمة: {item['label']}\n"
-                f"🔢 العدد: <b>{q}</b>\n"
-                f"💰 التكلفة: <b>{total}</b> نقطة\n"
-                f"🔗 الرابط: {link}\n"
-                f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
-                f"📦 سيتم تنفيذ طلبك يدوياً قريباً."
-                f"{desc_section_m}",
+                t("order_manual_ok", lang,
+                  svc=item['label'], qty=q,
+                  cost=total, bal=u['points'], unit=unit)
+                + f"\n🔗 {link}"
+                + desc_section_m,
                 parse_mode='HTML',
                 reply_markup=user_keyboard(),
                 disable_web_page_preview=True,
@@ -3310,10 +3395,32 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
         except ValueError:
             await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً لرقم الخدمة.")
             return
+        prov = state["tmp"].get("smm_provider", "")
+        # ── جلب الحد الأقصى والوصف تلقائياً ──
+        fetched_max = None
+        fetched_desc = ""
+        if prov in PROVIDERS:
+            wait_msg = await msg.answer("⏳ جارٍ جلب تفاصيل الخدمة...", parse_mode='HTML')
+            svc_info = await smm_fetch_service_info(prov, sid)
+            try:
+                await bot.delete_message(msg.chat.id, wait_msg.message_id)
+            except Exception:
+                pass
+            if svc_info:
+                try:
+                    fetched_max = int(svc_info.get("max", svc_info.get("max_qty", 0)) or 0)
+                except Exception:
+                    fetched_max = None
+                fetched_desc = (svc_info.get("description") or "").strip()
         state["tmp"]["smm_service_id"] = sid
+        if fetched_max:
+            state["tmp"]["max_qty"] = fetched_max
+        if fetched_desc:
+            state["tmp"]["description"] = fetched_desc
         state["step"] = 3
+        max_info = f" | الحد الأقصى: <b>{fetched_max:,}</b>" if fetched_max else ""
         await msg.answer(
-            f"✅ رقم الخدمة: <code>{sid}</code>\n\n"
+            f"✅ رقم الخدمة: <code>{sid}</code>{max_info}\n\n"
             f"💰 الآن أرسل <b>سعر الخدمة</b> بالنقاط لكل 1000:",
             parse_mode='HTML',
         )
@@ -3333,8 +3440,42 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
             await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً (≥ 1).")
             return
         state["tmp"]["min_qty"] = min_q
+        # إذا كان الحد الأقصى محدداً تلقائياً من API نحفظ مباشرة
+        auto_max = state["tmp"].get("max_qty")
+        if auto_max:
+            max_q = int(auto_max)
+            if max_q < min_q:
+                max_q = min_q * 10  # fallback
+            prov = state["tmp"].get("smm_provider", "")
+            new_item = {
+                "id":             new_id(),
+                "label":          state["tmp"].get("label", "خدمة"),
+                "kind":           "service_item",
+                "text":           "",
+                "price":          int(state["tmp"].get("price", 0)),
+                "smm_provider":   prov,
+                "smm_service_id": int(state["tmp"].get("smm_service_id", 0)),
+                "description":    state["tmp"].get("description", ""),
+                "min_qty":        min_q,
+                "max_qty":        max_q,
+                "children":       [],
+            }
+            _commit(new_item)
+            admin_state.pop(ADMIN_ID, None)
+            await msg.answer(
+                f"✅ <b>تم إضافة الخدمة بنجاح!</b>\n\n"
+                f"📌 الاسم: {new_item['label']}\n"
+                f"🔌 المزوّد: {provider_label(prov) if prov else 'يدوي'}\n"
+                f"🆔 رقم الخدمة: <code>{new_item['smm_service_id']}</code>\n"
+                f"💰 السعر: {new_item['price']} نقطة / 1000\n"
+                f"🔢 الحد: {min_q:,} – {max_q:,}",
+                parse_mode='HTML',
+                reply_markup=admin_main_keyboard(),
+            )
+            return
+        # إذا لم يُجلب الحد الأقصى تلقائياً، اطلبه يدوياً
         state["step"] = 7
-        await msg.answer("📝 أرسل الحد الأقصى لعدد الرشق (مثال: 10000):")
+        await msg.answer("🔺 أرسل <b>الحد الأقصى</b> للطلب (مثال: 10000):", parse_mode='HTML')
         return
 
     if state["step"] == 7:
@@ -3389,11 +3530,101 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
 
 
 # ================================================================
+#                     معالجات تغيير اللغة
+# ================================================================
+@dp.callback_query_handler(lambda c: c.data == "lang_pick")
+async def lang_pick_handler(c: types.CallbackQuery):
+    await c.answer()
+    lang = get_lang(c.from_user.id)
+    await c.message.answer(t("choose_lang", lang), reply_markup=lang_keyboard())
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("setlang:"))
+async def setlang_handler(c: types.CallbackQuery):
+    lang_code = c.data.split(":", 1)[1]
+    if lang_code not in SUPPORTED_LANGS:
+        await c.answer("⚠️ لغة غير مدعومة.")
+        return
+    uid = str(c.from_user.id)
+    if uid not in users:
+        users[uid] = {"points": 0}
+    users[uid]["lang"] = lang_code
+    save_users()
+    await c.answer(SUPPORTED_LANGS[lang_code], show_alert=False)
+    await c.message.edit_text(t("lang_saved", lang_code))
+
+
+# ================================================================
 #       استقبال إدخال المستخدم (للطلبات والتحويل)
 # ================================================================
 @dp.message_handler(lambda m: m.from_user.id in user_state)
 async def user_flow_input(msg: types.Message):
     await _process_user_flow(msg)
+
+
+# ================================================================
+#              فاحص حالة الطلبات في الخلفية (كل 5 دقائق)
+# ================================================================
+async def _order_status_checker():
+    """يفحص الطلبات المعلقة ويُشعر المستخدمين عند الاكتمال."""
+    await asyncio.sleep(60)          # انتظر دقيقة بعد الإطلاق
+    while True:
+        try:
+            orders = load_smm_orders()
+            pending = [o for o in orders if o.get("status") in ("Pending", "Processing", "In progress")]
+            if pending:
+                # نجمع الطلبات حسب المزوّد
+                by_prov: dict = {}
+                for o in pending:
+                    prov = o.get("provider", "")
+                    if prov not in PROVIDERS:
+                        continue
+                    by_prov.setdefault(prov, []).append(o)
+
+                changed = False
+                for prov, plist in by_prov.items():
+                    ids = [str(o["order_id"]) for o in plist if o.get("order_id")]
+                    if not ids:
+                        continue
+                    payload = {"action": "status", "orders": ",".join(ids)}
+                    resp = await smm_api_call(prov, payload)
+                    if not isinstance(resp, dict):
+                        continue
+                    for o in plist:
+                        oid = str(o.get("order_id", ""))
+                        if oid not in resp:
+                            continue
+                        new_status = resp[oid].get("status", "")
+                        if new_status in ("Completed", "Partial", "Canceled", "Cancelled"):
+                            o["status"] = new_status
+                            changed = True
+                            uid = o.get("user_id")
+                            if not uid:
+                                continue
+                            lang = get_lang(uid)
+                            try:
+                                if new_status == "Completed":
+                                    await bot.send_message(
+                                        uid,
+                                        t("order_completed", lang,
+                                          svc=o.get("service_label", "—"),
+                                          qty=o.get("quantity", "—"),
+                                          oid=oid),
+                                        parse_mode='HTML',
+                                    )
+                                elif new_status == "Partial":
+                                    await bot.send_message(
+                                        uid,
+                                        t("order_partial", lang, oid=oid),
+                                        parse_mode='HTML',
+                                    )
+                            except Exception as send_err:
+                                logging.warning(f"إشعار مستخدم {uid} فشل: {send_err}")
+                if changed:
+                    save_smm_orders()
+        except Exception as err:
+            logging.warning(f"order_status_checker خطأ: {err}")
+        await asyncio.sleep(300)   # كل 5 دقائق
 
 
 # ================================================================
@@ -3407,6 +3638,7 @@ async def on_startup(_):
         logging.info(f"Bot started as @{BOT_USERNAME}")
     except Exception as e:
         logging.warning(f"تعذر جلب اسم البوت: {e}")
+    asyncio.ensure_future(_order_status_checker())
 
 
 if __name__ == '__main__':
