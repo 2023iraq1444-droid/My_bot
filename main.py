@@ -1,7 +1,9 @@
 import json
 import os
+import io
 import logging
 import aiohttp
+import urllib.request
 from datetime import date
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -22,6 +24,7 @@ SETTINGS_FILE = 'settings.json'
 ASIA_FILE = 'asia_requests.json'
 SMM_ORDERS_FILE = 'smm_orders.json'
 CHANNELS_FILE = 'channels.json'
+ADMINS_FILE = 'admins.json'
 
 # ---------- إعدادات آسيا سيل (افتراضية، قابلة للتعديل من لوحة المالك) ----------
 ASIA_RECEIVER_NUMBER_DEFAULT = "07726590999"
@@ -98,6 +101,20 @@ async def smm_order_status(provider: str, order_id) -> dict:
 
 async def smm_balance(provider: str) -> dict:
     return await smm_api_call(provider, {"action": "balance"})
+
+
+async def smm_fetch_service_info(provider: str, service_id: int) -> dict:
+    """يجلب تفاصيل خدمة واحدة (الاسم، الحد الأدنى، الأقصى، الوصف) من المزوّد."""
+    result = await smm_api_call(provider, {"action": "services"})
+    if isinstance(result, list):
+        for svc in result:
+            try:
+                sid = int(svc.get("service", svc.get("id", 0)))
+                if sid == service_id:
+                    return svc
+            except Exception:
+                continue
+    return {}
 
 
 # ================================================================
@@ -210,6 +227,32 @@ def new_channel_id() -> str:
     cid = str(_next_channel_id)
     _next_channel_id += 1
     return cid
+
+
+# ================================================================
+#                  نظام الادمنز الإضافيين
+# ================================================================
+def load_extra_admins() -> set:
+    if os.path.exists(ADMINS_FILE):
+        try:
+            with open(ADMINS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return set(int(x) for x in data)
+        except Exception:
+            pass
+    return set()
+
+
+def save_extra_admins():
+    with open(ADMINS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(list(extra_admins), f, ensure_ascii=False, indent=2)
+
+
+extra_admins: set = load_extra_admins()
+
+
+def is_admin(uid: int) -> bool:
+    return uid == ADMIN_ID or uid in extra_admins
 
 
 async def get_unsubscribed(user_id: int) -> list:
@@ -762,6 +805,8 @@ def admin_main_keyboard():
     kb.add(types.InlineKeyboardButton("🔌 المزوّدات (SMM)", callback_data="a:providers"))
     kb.add(types.InlineKeyboardButton("📊 إحصائيات البوت", callback_data="a:stats"))
     kb.add(types.InlineKeyboardButton("📣 رسالة جماعية لكل المستخدمين", callback_data="a:broadcast"))
+    kb.add(types.InlineKeyboardButton("👥 إدارة الادمنز", callback_data="a:admins"))
+    kb.add(types.InlineKeyboardButton("📄 تصدير معلومات البوت PDF", callback_data="a:export_pdf"))
     kb.add(types.InlineKeyboardButton("♻️ استعادة القائمة الافتراضية", callback_data="a:reset"))
     return kb
 
@@ -866,6 +911,151 @@ def platform_picker_keyboard(item_id):
         kb.add(types.InlineKeyboardButton(lbl, callback_data=f"a:setplat:{item_id}:{val or 'none'}"))
     kb.add(types.InlineKeyboardButton("⬅️ رجوع", callback_data=f"a:edit:{item_id}"))
     return kb
+
+
+def admins_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("➕ إضافة ادمن جديد", callback_data="a:admin_add"))
+    for aid in sorted(extra_admins):
+        kb.add(types.InlineKeyboardButton(f"🗑 حذف ادمن: {aid}", callback_data=f"a:admin_del:{aid}"))
+    kb.add(types.InlineKeyboardButton("⬅️ رجوع", callback_data="a:back"))
+    return kb
+
+
+# ================================================================
+#              توليد ملف PDF لمعلومات البوت
+# ================================================================
+ARABIC_FONT_PATH = "Amiri-Regular.ttf"
+ARABIC_FONT_URL = (
+    "https://github.com/aliftype/amiri/raw/main/fonts/Amiri-Regular.ttf"
+)
+
+
+def _ensure_font():
+    if not os.path.exists(ARABIC_FONT_PATH):
+        try:
+            urllib.request.urlretrieve(ARABIC_FONT_URL, ARABIC_FONT_PATH)
+        except Exception as e:
+            logging.warning(f"تعذّر تحميل الخط العربي: {e}")
+            return False
+    return True
+
+
+def _ar(text: str) -> str:
+    """تشكيل النص العربي لعرضه في PDF."""
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        reshaped = arabic_reshaper.reshape(str(text))
+        return get_display(reshaped)
+    except Exception:
+        return str(text)
+
+
+def build_bot_pdf() -> bytes | None:
+    """ينشئ ملف PDF يحتوي على معلومات البوت الكاملة."""
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        return None
+
+    if not _ensure_font():
+        return None
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.add_font("Amiri", "", ARABIC_FONT_PATH, uni=True)
+
+    def title(txt):
+        pdf.set_font("Amiri", size=18)
+        pdf.set_fill_color(30, 30, 80)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(0, 12, _ar(txt), ln=True, align="R", fill=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(2)
+
+    def section(txt):
+        pdf.set_font("Amiri", size=14)
+        pdf.set_fill_color(200, 220, 255)
+        pdf.cell(0, 9, _ar(txt), ln=True, align="R", fill=True)
+        pdf.ln(1)
+
+    def row(label, value):
+        pdf.set_font("Amiri", size=11)
+        val_str = _ar(str(value) if value is not None else "—")
+        lbl_str = _ar(str(label))
+        pdf.cell(0, 8, f"{val_str}  :  {lbl_str}", ln=True, align="R")
+
+    # ── العنوان ──
+    title("📋 معلومات البوت")
+    pdf.set_font("Amiri", size=10)
+    pdf.cell(0, 7, _ar(f"تاريخ التصدير: {date.today().isoformat()}"), ln=True, align="R")
+    pdf.ln(3)
+
+    # ── المعلومات الأساسية ──
+    section("⚙️ الإعدادات الأساسية")
+    row("اسم البوت", settings.get("bot_title") or "—")
+    row("رسالة الترحيب", (settings.get("welcome_message") or "—")[:80])
+    row("اسم الدعم", f"@{settings.get('support_username') or '—'}")
+    row("وضع الصيانة", "مفعّل ✓" if settings.get("maintenance_mode") else "معطّل")
+    row("نقاط الهدية اليومية", settings.get("daily_gift_points", 0))
+    row("نقاط الإحالة", settings.get("referral_points", 0))
+    pdf.ln(3)
+
+    # ── الادمنز ──
+    section("👥 الادمنز")
+    row("المالك (Owner)", ADMIN_ID)
+    if extra_admins:
+        for aid in sorted(extra_admins):
+            row("ادمن", aid)
+    else:
+        row("ادمنز إضافيون", "لا يوجد")
+    pdf.ln(3)
+
+    # ── المزوّدات ──
+    section("🔌 المزوّدات (SMM)")
+    for key, info in PROVIDERS.items():
+        api_key_set = "✓ محدود" if os.getenv(info["key_env"]) else "✗ غير محدد"
+        row(info["label"], f"API Key: {api_key_set}")
+    pdf.ln(3)
+
+    # ── الإحصائيات ──
+    section("📊 الإحصائيات")
+    row("عدد المستخدمين", len(users))
+    row("عدد طلبات SMM", len(smm_orders))
+    row("قنوات الاشتراك الإجباري", len(channels))
+    pdf.ln(3)
+
+    # ── الخدمات ──
+    section("🛒 الخدمات المضافة")
+    def collect_services(items, depth=0):
+        for it in items:
+            if it.get("kind") == "service_item":
+                prov = it.get("smm_provider") or "يدوي"
+                sid = it.get("smm_service_id") or "—"
+                row(
+                    it.get("label", "؟"),
+                    f"سعر: {it.get('price',0)}/1000 | مزوّد: {prov} | ID: {sid} | "
+                    f"عدد: {it.get('min_qty',1)}-{it.get('max_qty',9999)}"
+                )
+            if it.get("children"):
+                collect_services(it["children"], depth + 1)
+
+    collect_services(menu)
+    pdf.ln(3)
+
+    # ── قنوات الاشتراك الإجباري ──
+    section("🔒 قنوات الاشتراك الإجباري")
+    if channels:
+        for ch in channels:
+            row(ch.get("title") or ch.get("chat_id"), ch.get("chat_id"))
+    else:
+        row("القنوات", "لا يوجد")
+
+    buf = io.BytesIO()
+    pdf.output(buf)
+    return buf.getvalue()
 
 
 def settings_keyboard():
@@ -1742,6 +1932,72 @@ async def cb_admin(c: types.CallbackQuery):
         )
         return
 
+    # ─── إدارة الادمنز ───
+    if action == "admins":
+        if c.from_user.id != ADMIN_ID:
+            await c.answer("⛔ هذا الخيار للمالك فقط.", show_alert=True)
+            return
+        await c.answer()
+        count = len(extra_admins)
+        await c.message.answer(
+            f"👥 <b>إدارة الادمنز</b>\n\n"
+            f"المالك (Owner): <code>{ADMIN_ID}</code>\n"
+            f"عدد الادمنز الإضافيين: <b>{count}</b>\n\n"
+            + (
+                "\n".join(f"• <code>{aid}</code>" for aid in sorted(extra_admins))
+                if extra_admins else "لا يوجد ادمنز إضافيون."
+            ),
+            parse_mode='HTML',
+            reply_markup=admins_keyboard(),
+        )
+        return
+
+    if action == "admin_add":
+        if c.from_user.id != ADMIN_ID:
+            await c.answer("⛔ هذا الخيار للمالك فقط.", show_alert=True)
+            return
+        admin_state[ADMIN_ID] = {"action": "admin_add"}
+        await c.answer()
+        await c.message.answer(
+            "👤 أرسل <b>معرّف المستخدم (User ID)</b> للادمن الجديد:\n"
+            "للإلغاء أرسل /cancel",
+            parse_mode='HTML',
+        )
+        return
+
+    if action == "admin_del":
+        if c.from_user.id != ADMIN_ID:
+            await c.answer("⛔ هذا الخيار للمالك فقط.", show_alert=True)
+            return
+        target_id = int(parts[2])
+        extra_admins.discard(target_id)
+        save_extra_admins()
+        await c.answer(f"✅ تم حذف الادمن {target_id}.", show_alert=True)
+        await c.message.edit_text(
+            f"👥 <b>إدارة الادمنز</b>\n\nتم حذف <code>{target_id}</code> من الادمنز.",
+            parse_mode='HTML',
+            reply_markup=admins_keyboard(),
+        )
+        return
+
+    # ─── تصدير PDF ───
+    if action == "export_pdf":
+        await c.answer("⏳ جارٍ إنشاء ملف PDF...")
+        pdf_bytes = build_bot_pdf()
+        if pdf_bytes is None:
+            await c.message.answer(
+                "⚠️ تعذّر إنشاء PDF. تأكد من تثبيت: fpdf2, arabic-reshaper, python-bidi"
+            )
+            return
+        filename = f"bot_info_{date.today().isoformat()}.pdf"
+        await bot.send_document(
+            c.from_user.id,
+            types.InputFile(io.BytesIO(pdf_bytes), filename=filename),
+            caption=f"📄 <b>معلومات البوت</b> — {date.today().isoformat()}",
+            parse_mode='HTML',
+        )
+        return
+
     if action == "setdaily":
         admin_state[ADMIN_ID] = {"action": "set_daily"}
         await c.answer()
@@ -1865,15 +2121,23 @@ async def cb_admin(c: types.CallbackQuery):
         if prefix.startswith("addsub_"):
             parent_id = prefix.split("_", 1)[1]
             admin_state[ADMIN_ID] = {
-                "action": "add_sub", "parent_id": parent_id, "kind": kind, "step": 1, "tmp": {}
+                "action": "add_sub", "parent_id": parent_id, "kind": kind, "step": 35, "tmp": {}
             }
         else:
             where = "start" if prefix.endswith("_start") else "end"
             admin_state[ADMIN_ID] = {
-                "action": "add_top", "where": where, "kind": kind, "step": 1, "tmp": {}
+                "action": "add_top", "where": where, "kind": kind, "step": 35, "tmp": {}
             }
         await c.answer()
-        await c.message.answer("📝 أرسل اسم الزر الجديد (مثال: 🆕 خيار جديد):")
+        if kind == "service_item":
+            await c.message.answer(
+                "🔌 أولاً اختر <b>المزوّد</b> الذي ستُربط به هذه الخدمة:",
+                parse_mode='HTML',
+                reply_markup=provider_picker_keyboard("new", edit_mode=False),
+            )
+        else:
+            admin_state[ADMIN_ID]["step"] = 1
+            await c.message.answer("📝 أرسل اسم الزر الجديد (مثال: 🆕 خيار جديد):")
         return
 
     if action == "edit":
@@ -2145,19 +2409,18 @@ async def cb_admin(c: types.CallbackQuery):
         if prov == "manual":
             st["tmp"]["smm_provider"] = ""
             st["tmp"]["smm_service_id"] = 0
-            # نتخطى مرحلة طلب الـ smmid
-            st["step"] = 5
+            st["step"] = 1
             await c.answer()
-            await c.message.answer("📝 أرسل وصف الخدمة (يظهر للمشترك). إذا لا تريد وصفاً أرسل: -")
+            await c.message.answer("📝 أرسل <b>اسم الخدمة</b> كما ستظهر للمستخدمين:", parse_mode='HTML')
             return
         if prov not in PROVIDERS:
             await c.answer("⚠️ مزوّد غير معروف", show_alert=True)
             return
         st["tmp"]["smm_provider"] = prov
-        st["step"] = 4  # ننتقل لمرحلة طلب smmid
+        st["step"] = 4
         await c.answer()
         await c.message.answer(
-            f"🆔 أرسل <b>معرّف الخدمة (Service ID)</b> من موقع {provider_label(prov)}.",
+            f"🆔 أرسل <b>رقم الخدمة (Service ID)</b> من موقع {provider_label(prov)}:",
             parse_mode='HTML',
         )
         return
@@ -2743,6 +3006,28 @@ async def admin_input(msg: types.Message):
         )
         return
 
+    # ---------- إضافة ادمن جديد ----------
+    if state["action"] == "admin_add":
+        try:
+            new_aid = int(text.strip())
+        except ValueError:
+            await msg.answer("⚠️ أرسل معرّف رقمي صحيح (User ID).")
+            return
+        if new_aid == ADMIN_ID:
+            await msg.answer("ℹ️ هذا هو معرّف المالك بالفعل.")
+            admin_state.pop(ADMIN_ID, None)
+            return
+        extra_admins.add(new_aid)
+        save_extra_admins()
+        admin_state.pop(ADMIN_ID, None)
+        await msg.answer(
+            f"✅ تم إضافة الادمن <code>{new_aid}</code> بنجاح.\n"
+            f"إجمالي الادمنز الإضافيين: <b>{len(extra_admins)}</b>",
+            parse_mode='HTML',
+            reply_markup=admin_main_keyboard(),
+        )
+        return
+
     # ---------- تعديل عناصر القائمة ----------
     if state["action"] == "edit_label":
         item, _, _ = find_item(state["target_id"])
@@ -2916,30 +3201,84 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
             await msg.answer("⚠️ أرسل رقماً صحيحاً للسعر.")
             return
         state["tmp"]["price"] = price
-        # اختيار المزوّد من الأزرار (وليس نص)
-        state["step"] = 35  # حالة انتظار اختيار المزوّد
+        prov    = state["tmp"].get("smm_provider", "")
+        smm_sid = int(state["tmp"].get("smm_service_id", 0) or 0)
+        # --- SMM: كل البيانات محضّرة مسبقاً، نحفظ مباشرة ---
+        if smm_sid > 0 and prov:
+            new_item = {
+                "id":             new_id(),
+                "label":          state["tmp"].get("label", f"خدمة {smm_sid}"),
+                "kind":           "service_item",
+                "text":           "",
+                "price":          price,
+                "smm_provider":   prov,
+                "smm_service_id": smm_sid,
+                "description":    state["tmp"].get("description", ""),
+                "min_qty":        int(state["tmp"].get("min_qty", 10)),
+                "max_qty":        int(state["tmp"].get("max_qty", 10000)),
+                "children":       [],
+            }
+            _commit(new_item)
+            admin_state.pop(ADMIN_ID, None)
+            await msg.answer(
+                f"✅ <b>تم إضافة الخدمة بنجاح!</b>\n\n"
+                f"📌 الاسم: {new_item['label']}\n"
+                f"🔌 المزوّد: {provider_label(prov)}\n"
+                f"🆔 رقم الخدمة: <code>{smm_sid}</code>\n"
+                f"💰 السعر: {price} نقطة / 1000\n"
+                f"🔢 العدد: {new_item['min_qty']:,} – {new_item['max_qty']:,}",
+                parse_mode='HTML',
+                reply_markup=admin_main_keyboard(),
+            )
+            return
+        # --- يدوي: اطلب الوصف ثم min/max ---
+        state["step"] = 5
         await msg.answer(
-            "🔌 الآن اختر <b>المزوّد</b> الذي تريد ربط هذه الخدمة به:\n"
-            "يمكنك أيضاً اختيار التنفيذ اليدوي.",
-            parse_mode='HTML',
-            reply_markup=provider_picker_keyboard("new", edit_mode=False),
+            "📝 أرسل وصف الخدمة (يظهر للمشترك).\n"
+            "إذا لا تريد وصفاً أرسل: -"
         )
         return
 
     if state["step"] == 4:
         try:
             sid = int(text.strip())
-            if sid < 0: raise ValueError
+            if sid <= 0: raise ValueError
         except ValueError:
-            await msg.answer("⚠️ أرسل رقماً صحيحاً (أو 0 للتنفيذ اليدوي).")
+            await msg.answer("⚠️ أرسل رقماً صحيحاً موجباً لرقم الخدمة.")
             return
+        prov = state["tmp"].get("smm_provider", "")
+        wait_msg = await msg.answer(f"⏳ جارٍ جلب تفاصيل الخدمة <code>{sid}</code> من {provider_label(prov)}...", parse_mode='HTML')
+        svc_info = await smm_fetch_service_info(prov, sid)
+        try:
+            await bot.delete_message(msg.chat.id, wait_msg.message_id)
+        except Exception:
+            pass
+        if not svc_info:
+            await msg.answer(
+                f"⚠️ لم يُعثر على خدمة برقم <code>{sid}</code> في {provider_label(prov)}.\n"
+                f"تأكد من الرقم وأعد الإرسال، أو أرسل /cancel للإلغاء.",
+                parse_mode='HTML',
+            )
+            return
+        svc_name = (svc_info.get("name") or svc_info.get("service_name") or f"خدمة {sid}").strip()
+        svc_min  = int(svc_info.get("min", svc_info.get("min_qty", 10)) or 10)
+        svc_max  = int(svc_info.get("max", svc_info.get("max_qty", 10000)) or 10000)
+        svc_desc = (svc_info.get("description") or "").strip()
         state["tmp"]["smm_service_id"] = sid
-        if sid == 0:
-            state["tmp"]["smm_provider"] = ""
-        state["step"] = 5
+        state["tmp"]["label"]          = svc_name
+        state["tmp"]["min_qty"]        = svc_min
+        state["tmp"]["max_qty"]        = svc_max
+        state["tmp"]["description"]    = svc_desc
+        state["step"] = 3
+        desc_line = f"\n📄 <b>الوصف:</b>\n<blockquote expandable>{svc_desc}</blockquote>" if svc_desc else ""
         await msg.answer(
-            "📝 أرسل وصف الخدمة (يظهر للمشترك).\n"
-            "إذا لا تريد وصفاً أرسل: -"
+            f"✅ <b>تم جلب تفاصيل الخدمة تلقائياً:</b>\n\n"
+            f"📌 <b>الاسم:</b> {svc_name}\n"
+            f"🔢 <b>الحد الأدنى:</b> {svc_min:,}\n"
+            f"🔢 <b>الحد الأقصى:</b> {svc_max:,}"
+            f"{desc_line}\n\n"
+            f"💰 الآن أرسل <b>سعر الخدمة</b> بالنقاط لكل 1000:",
+            parse_mode='HTML',
         )
         return
 
