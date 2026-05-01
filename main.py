@@ -106,14 +106,33 @@ async def smm_balance(provider: str) -> dict:
 async def smm_fetch_service_info(provider: str, service_id: int) -> dict:
     """يجلب تفاصيل خدمة واحدة (الاسم، الحد الأدنى، الأقصى، الوصف) من المزوّد."""
     result = await smm_api_call(provider, {"action": "services"})
+
+    # بعض المزودين يعيدون قائمة مباشرة، وبعضهم يعيد dict يحتوي على القائمة
+    services_list = None
     if isinstance(result, list):
-        for svc in result:
-            try:
-                sid = int(svc.get("service", svc.get("id", 0)))
-                if sid == service_id:
-                    return svc
-            except Exception:
-                continue
+        services_list = result
+    elif isinstance(result, dict):
+        # محاولة استخراج القائمة من مفاتيح شائعة
+        for key in ("services", "data", "result"):
+            if isinstance(result.get(key), list):
+                services_list = result[key]
+                break
+
+    if not services_list:
+        logging.warning(f"smm_fetch_service_info: رد غير متوقع من {provider}: {str(result)[:300]}")
+        return {}
+
+    sid_str = str(service_id)
+    for svc in services_list:
+        try:
+            # نقارن كنص لتجنب مشاكل int/str
+            svc_id = str(svc.get("service", svc.get("id", svc.get("service_id", ""))))
+            if svc_id == sid_str:
+                return svc
+        except Exception:
+            continue
+
+    logging.warning(f"smm_fetch_service_info: لم يُعثر على service_id={service_id} في قائمة {provider} ({len(services_list)} خدمة)")
     return {}
 
 
@@ -1418,6 +1437,79 @@ async def cmd_smm_balance(msg: types.Message):
         else:
             parts.append(f"❌ {info['label']}: <code>{resp.get('error','?')}</code>")
     await msg.answer("\n".join(parts), parse_mode='HTML')
+
+
+@dp.message_handler(commands=['smm_test'])
+async def cmd_smm_test(msg: types.Message):
+    """تشخيص: /smm_test <smmfollows|jap> <service_id>"""
+    if msg.from_user.id != ADMIN_ID:
+        return
+    args = (msg.get_args() or "").strip().split()
+    if len(args) < 2:
+        await msg.answer(
+            "الاستعمال:\n<code>/smm_test smmfollows 1234</code>\n"
+            "أو\n<code>/smm_test jap 1234</code>",
+            parse_mode='HTML')
+        return
+    prov = args[0].lower()
+    if prov not in PROVIDERS:
+        await msg.answer(f"⚠️ مزوّد غير معروف: {prov}\nالمزودون المتاحون: {', '.join(PROVIDERS.keys())}")
+        return
+    try:
+        sid = int(args[1])
+    except ValueError:
+        await msg.answer("⚠️ أرسل رقم خدمة صحيح.")
+        return
+
+    wait = await msg.answer(f"⏳ جارٍ جلب قائمة خدمات {provider_label(prov)}...")
+    result = await smm_api_call(prov, {"action": "services"})
+    try:
+        await bot.delete_message(msg.chat.id, wait.message_id)
+    except Exception:
+        pass
+
+    # نشخّص بنية الرد
+    if isinstance(result, list):
+        total = len(result)
+        # نبحث عن الخدمة
+        found = None
+        sid_str = str(sid)
+        for svc in result:
+            svc_id = str(svc.get("service", svc.get("id", svc.get("service_id", ""))))
+            if svc_id == sid_str:
+                found = svc
+                break
+        if found:
+            info_text = json.dumps(found, ensure_ascii=False, indent=2)[:800]
+            await msg.answer(
+                f"✅ <b>وُجدت الخدمة {sid} في {provider_label(prov)}</b>\n"
+                f"إجمالي الخدمات: {total}\n\n"
+                f"<pre>{info_text}</pre>",
+                parse_mode='HTML',
+            )
+        else:
+            # أظهر أول خدمة كمرجع للحقول
+            sample = json.dumps(result[0], ensure_ascii=False, indent=2)[:400] if result else "{}"
+            await msg.answer(
+                f"❌ <b>الخدمة {sid} غير موجودة</b>\n"
+                f"إجمالي الخدمات في الموقع: {total}\n\n"
+                f"مثال على حقول الخدمة الأولى:\n<pre>{sample}</pre>\n\n"
+                f"تأكد من رقم الخدمة الصحيح من الموقع.",
+                parse_mode='HTML',
+            )
+    elif isinstance(result, dict) and "error" in result:
+        await msg.answer(
+            f"❌ <b>خطأ من API {provider_label(prov)}:</b>\n"
+            f"<code>{result['error']}</code>\n\n"
+            f"تحقق من مفتاح API ومن أن حسابك مفعّل.",
+            parse_mode='HTML',
+        )
+    else:
+        raw = str(result)[:600]
+        await msg.answer(
+            f"⚠️ <b>رد غير متوقع من {provider_label(prov)}:</b>\n<pre>{raw}</pre>",
+            parse_mode='HTML',
+        )
 
 
 @dp.message_handler(commands=['smm_status'])
@@ -3255,8 +3347,12 @@ async def _add_flow(msg: types.Message, state: dict, parent, where):
             pass
         if not svc_info:
             await msg.answer(
-                f"⚠️ لم يُعثر على خدمة برقم <code>{sid}</code> في {provider_label(prov)}.\n"
-                f"تأكد من الرقم وأعد الإرسال، أو أرسل /cancel للإلغاء.",
+                f"⚠️ لم يُعثر على خدمة برقم <code>{sid}</code> في {provider_label(prov)}.\n\n"
+                f"الأسباب المحتملة:\n"
+                f"• الرقم خاطئ، تحقق من الموقع مباشرةً\n"
+                f"• مفتاح API غير مضبوط أو منتهي الصلاحية\n"
+                f"• الخدمة غير متاحة في حسابك\n\n"
+                f"أعد إرسال الرقم أو أرسل /cancel للإلغاء.",
                 parse_mode='HTML',
             )
             return
