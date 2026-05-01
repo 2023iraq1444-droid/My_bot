@@ -2272,16 +2272,20 @@ async def _process_user_flow(msg: types.Message) -> bool:
                         "created_at": date.today().isoformat(),
                     }
                     save_smm_orders()
+                    svc_desc = (item.get("description") or "").strip()
+                    desc_section = (
+                        f"\n\n📄 <b>تفاصيل الخدمة:</b>\n<blockquote expandable>{svc_desc}</blockquote>"
+                        if svc_desc else ""
+                    )
                     await msg.answer(
                         f"✅ <b>تم تنفيذ طلبك بنجاح!</b>\n\n"
                         f"🛒 الخدمة: {item['label']}\n"
-                        f"🔌 المزوّد: {provider_label(provider)}\n"
                         f"🔢 العدد: <b>{q}</b>\n"
                         f"💰 التكلفة: <b>{total}</b> نقطة\n"
                         f"🔗 الرابط: {link}\n"
                         f"🆔 رقم الطلب: <code>{order_id}</code>\n"
-                        f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
-                        f"📦 سيبدأ التنفيذ خلال دقائق على موقع المزوّد.",
+                        f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة"
+                        f"{desc_section}",
                         parse_mode='HTML',
                         reply_markup=user_keyboard(),
                         disable_web_page_preview=True,
@@ -2308,8 +2312,7 @@ async def _process_user_flow(msg: types.Message) -> bool:
                     save_users()
                     err = resp.get("error", "خطأ غير معروف من الموقع")
                     await msg.answer(
-                        f"❌ <b>تعذّر تنفيذ الطلب على {provider_label(provider)}</b>\n\n"
-                        f"السبب: {err}\n\n"
+                        f"⚠️ <b>هناك مشكلة، يرجى المحاولة لاحقاً.</b>\n\n"
                         f"💵 تم إعادة <b>{total}</b> نقطة إلى رصيدك.\n"
                         f"رصيدك الحالي: <b>{u['points']}</b>",
                         parse_mode='HTML',
@@ -2335,6 +2338,11 @@ async def _process_user_flow(msg: types.Message) -> bool:
                 return True
 
             # ===== حالة: تنفيذ يدوي =====
+            svc_desc_m = (item.get("description") or "").strip()
+            desc_section_m = (
+                f"\n\n📄 <b>تفاصيل الخدمة:</b>\n<blockquote expandable>{svc_desc_m}</blockquote>"
+                if svc_desc_m else ""
+            )
             await msg.answer(
                 f"✅ <b>تم استلام طلبك بنجاح</b>\n\n"
                 f"🛒 الخدمة: {item['label']}\n"
@@ -2342,7 +2350,8 @@ async def _process_user_flow(msg: types.Message) -> bool:
                 f"💰 التكلفة: <b>{total}</b> نقطة\n"
                 f"🔗 الرابط: {link}\n"
                 f"💵 رصيدك الآن: <b>{u['points']}</b> نقطة\n\n"
-                f"📦 سيتم تنفيذ طلبك يدوياً قريباً.",
+                f"📦 سيتم تنفيذ طلبك يدوياً قريباً."
+                f"{desc_section_m}",
                 parse_mode='HTML',
                 reply_markup=user_keyboard(),
                 disable_web_page_preview=True,
